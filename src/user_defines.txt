@@ -38,6 +38,35 @@
 # Default is 30 seconds if not defined, value can be 0-254.
 #-DFAN_MIN_RUNTIME=30
 
+### DEBUG OPTIONS: ###
+
+# *** STARBOUND SPECTRA: Debug UART is on GPIO 20 (RX) and GPIO 21 (TX) at 420000 baud ***
+# Not on USB serial! Use a USB-to-serial adapter connected to these GPIO pins.
+#
+# Enable maximum logging verbosity to UART serial (420000 baud)
+# All logs output to the UART serial port via the logging framework
+
+# Core debug logging (startup, diagnostics, config info)
+-DDEBUG_LOG
+
+# Per-packet link statistics (RSSI, SNR, antenna strength, LQ)
+-DDEBUG_RCVR_LINKSTATS
+
+# Per-antenna signal statistics (detailed SNR, RSSI sums, IRQ counts)
+-DDEBUG_RCVR_SIGNAL_STATS
+
+# Packet reception scoreboard (shows 'R' for received, 'r' for missed, 'T' for telemetry)
+-DDEBUG_RX_SCOREBOARD
+
+# BetaFlight link stats debug output
+-DDEBUG_BF_LINK_STATS
+
+# Frequency correction debug (for SX1280 radio)
+-DDEBUG_FREQ_CORRECTION
+
+# Disable verbose ESP32 framework logging (suppresses LittleFS "file not found" messages)
+-DCORE_DEBUG_LEVEL=ARDUHAL_LOG_LEVEL_WARN
+
 ### COMPATIBILITY OPTIONS: ###
 
 # Use a custom baud rate on the receiver for a KISS v1 FC (which runs at 400000) or any other oddball baud

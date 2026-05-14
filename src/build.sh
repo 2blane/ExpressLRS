@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="Unified_ESP32C3_2400_RX_via_UART"
 FIRMWARE_NAME="Unified_ESP32C3_2400_RX"
-BOARD_CONFIG_NAME="starbound-spectra"
+  BOARD_CONFIG_NAME="generic.rx_2400.starbound-spectra"
 BUILD_DIR="${SCRIPT_DIR}/.pio/build/${ENV_NAME}"
 OUTPUT_FILE="${SCRIPT_DIR}/elrsCombined.bin"
 ESPTOOL_PY="${HOME}/.platformio/packages/tool-esptoolpy/esptool.py"

@@ -1379,7 +1379,7 @@ static void setupSerial()
     }
 
 #if defined(DEBUG_ENABLED)
-#if defined(PLATFORM_ESP32_S3) || defined(PLATFORM_ESP32_C3)
+#if defined(PLATFORM_ESP32_S3)
     USBSerial.begin(460800);
     BackpackOrLogStrm = &USBSerial;
 #else
@@ -1552,9 +1552,51 @@ static void setupBindingFromConfig()
     OtaUpdateCrcInitFromUid();
 }
 
+#if defined(DEBUG_ENABLED) && defined(RADIO_SX128X)
+static void debugToggleSxPin(const char *name, int pin)
+{
+    DBGLN("%s Pin is #%d", name, pin);
+    if (pin == UNDEF_PIN)
+    {
+        DBGLN("%s is undefined, skipping", name);
+        return;
+    }
+
+    pinMode(pin, OUTPUT);
+    DBGLN("%s toggling off", name);
+    digitalWrite(pin, LOW);
+    delay(1000);
+
+    DBGLN("%s toggling on", name);
+    digitalWrite(pin, HIGH);
+    delay(1000);
+
+    // Release pin after probing; radio HAL will set final modes during init.
+    pinMode(pin, INPUT);
+    DBGLN("");
+}
+
+static void debugProbeSxPins()
+{
+    DBGLN("==== SX128x Pin Probe Start ====");
+    debugToggleSxPin("NSS", GPIO_PIN_NSS);
+    debugToggleSxPin("SCK", GPIO_PIN_SCK);
+    debugToggleSxPin("MOSI", GPIO_PIN_MOSI);
+    debugToggleSxPin("MISO", GPIO_PIN_MISO);
+    debugToggleSxPin("RST", GPIO_PIN_RST);
+    debugToggleSxPin("BUSY", GPIO_PIN_BUSY);
+    debugToggleSxPin("DIO1", GPIO_PIN_DIO1);
+    DBGLN("==== SX128x Pin Probe End ====");
+}
+#endif
+
 static void setupRadio()
 {
     ChannelDataReset();
+
+#if defined(DEBUG_ENABLED) && defined(RADIO_SX128X)
+    debugProbeSxPins();
+#endif
 
     Radio.currFreq = FHSSgetInitialFreq();
 #if defined(RADIO_SX127X)

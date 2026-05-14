@@ -144,6 +144,12 @@ static String builtinHardwareConfig;
 
 String& getHardware()
 {
+    if (!LittleFS.exists("/hardware.json"))
+    {
+        // Try JSON at the end of the firmware
+        return builtinHardwareConfig;
+    }
+
     File file = LittleFS.open("/hardware.json", "r");
     if (!file || file.isDirectory())
     {
@@ -220,8 +226,8 @@ bool hardware_init(EspFlashStream &strmFlash)
 
     Stream *strmSrc;
     JsonDocument doc;
-    File file = LittleFS.open("/hardware.json", "r");
-    if (!file || file.isDirectory()) {
+    File file;
+    if (!LittleFS.exists("/hardware.json")) {
         constexpr size_t hardwareConfigOffset = ELRSOPTS_PRODUCTNAME_SIZE + ELRSOPTS_DEVICENAME_SIZE + ELRSOPTS_OPTIONS_SIZE;
         strmFlash.setPosition(hardwareConfigOffset);
         if (!options_HasStringInFlash(strmFlash))
@@ -233,6 +239,11 @@ bool hardware_init(EspFlashStream &strmFlash)
     }
     else
     {
+        file = LittleFS.open("/hardware.json", "r");
+        if (!file || file.isDirectory())
+        {
+            return false;
+        }
         strmSrc = &file;
     }
 
