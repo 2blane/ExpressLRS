@@ -47,25 +47,25 @@
 # All logs output to the UART serial port via the logging framework
 
 # Core debug logging (startup, diagnostics, config info)
--DDEBUG_LOG
+#-DDEBUG_LOG
 
 # Per-packet link statistics (RSSI, SNR, antenna strength, LQ)
--DDEBUG_RCVR_LINKSTATS
+#-DDEBUG_RCVR_LINKSTATS
 
 # Per-antenna signal statistics (detailed SNR, RSSI sums, IRQ counts)
--DDEBUG_RCVR_SIGNAL_STATS
+#-DDEBUG_RCVR_SIGNAL_STATS
 
 # Packet reception scoreboard (shows 'R' for received, 'r' for missed, 'T' for telemetry)
--DDEBUG_RX_SCOREBOARD
+#-DDEBUG_RX_SCOREBOARD
 
 # BetaFlight link stats debug output
--DDEBUG_BF_LINK_STATS
+#-DDEBUG_BF_LINK_STATS
 
 # Frequency correction debug (for SX1280 radio)
--DDEBUG_FREQ_CORRECTION
+#-DDEBUG_FREQ_CORRECTION
 
 # Disable verbose ESP32 framework logging (suppresses LittleFS "file not found" messages)
--DCORE_DEBUG_LEVEL=ARDUHAL_LOG_LEVEL_WARN
+#-DCORE_DEBUG_LEVEL=ARDUHAL_LOG_LEVEL_WARN
 
 ### COMPATIBILITY OPTIONS: ###
 
