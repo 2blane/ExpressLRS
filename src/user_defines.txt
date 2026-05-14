@@ -65,7 +65,7 @@
 #-DDEBUG_FREQ_CORRECTION
 
 # Disable verbose ESP32 framework logging (suppresses LittleFS "file not found" messages)
-#-DCORE_DEBUG_LEVEL=ARDUHAL_LOG_LEVEL_WARN
+-DCORE_DEBUG_LEVEL=ARDUHAL_LOG_LEVEL_NONE
 
 ### COMPATIBILITY OPTIONS: ###
 

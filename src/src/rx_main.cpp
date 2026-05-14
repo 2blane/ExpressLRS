@@ -772,7 +772,9 @@ void ICACHE_RAM_ATTR HWtimerCallbackTock()
     }
 
     // For any serial drivers that need to send on a regular cadence (i.e. CRSF to betaflight)
+#if !defined(PLATFORM_ESP32_C3)
     sendImmediateRC();
+#endif
 
     OtaNonce++;
     HandleFHSS();
@@ -811,7 +813,8 @@ void LostConnection(bool resumeRx)
     {
         if (hwTimer::running)
         {
-            while(micros() - PFDloop.getIntEventTime() > 250); // time it just after the tock()
+            // Wait until we are just after TOCK; previous '>' condition could spin forever.
+            while (micros() - PFDloop.getIntEventTime() < 250) {}
             hwTimer::stop();
         }
         SetRFLinkRate(ExpressLRS_nextAirRateIndex, false); // also sets to initialFreq
@@ -2115,6 +2118,11 @@ void loop()
 
     // read and process any data from serial ports, send any queued non-RC data
     handleSerialIO();
+
+#if defined(PLATFORM_ESP32_C3)
+    // On C3, sending immediate RC from timer ISR can hit UART/RTOS primitives that are not ISR-safe.
+    sendImmediateRC();
+#endif
 
     checkRebootTime(now);
 
