@@ -242,7 +242,7 @@ static int timeout(devserial_ctx_t *ctx)
 
 void sendImmediateRC()
 {
-    if (serial0.io != nullptr && *(serial0.io) != nullptr && (*(serial0.io))->sendImmediateRC() && connectionState != serialUpdate)
+    if (*(serial0.io) != nullptr && (*(serial0.io))->sendImmediateRC() && connectionState != serialUpdate)
     {
         const bool missed = serial0.frameMissed;
         serial0.frameMissed = false;
@@ -253,7 +253,7 @@ void sendImmediateRC()
         (*(serial0.io))->sendRCFrame(sendChannels, missed, ChannelData);
     }
 #if defined(PLATFORM_ESP32)
-    if (serial1.io != nullptr && *(serial1.io) != nullptr && (*(serial1.io))->sendImmediateRC() && connectionState != serialUpdate)
+    if (*(serial1.io) != nullptr && (*(serial1.io))->sendImmediateRC() && connectionState != serialUpdate)
     {
         const bool missed = serial1.frameMissed;
         serial1.frameMissed = false;
@@ -269,13 +269,13 @@ void sendImmediateRC()
 void handleSerialIO()
 {
     // still get telemetry and send link stats if there's no model match
-    if (serial0.io != nullptr && *(serial0.io) != nullptr)
+    if (*(serial0.io) != nullptr)
     {
         (*(serial0.io))->processSerialInput();
         (*(serial0.io))->sendQueuedData((*(serial0.io))->getMaxSerialWriteSize());
     }
 #if defined(PLATFORM_ESP32)
-    if (serial1.io != nullptr && *(serial1.io) != nullptr)
+    if (*(serial1.io) != nullptr)
     {
         (*(serial1.io))->processSerialInput();
         (*(serial1.io))->sendQueuedData((*(serial1.io))->getMaxSerialWriteSize());

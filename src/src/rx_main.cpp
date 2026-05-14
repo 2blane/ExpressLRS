@@ -1579,13 +1579,13 @@ static void debugToggleSxPin(const char *name, int pin)
 static void debugProbeSxPins()
 {
     DBGLN("==== SX128x Pin Probe Start ====");
-    debugToggleSxPin("NSS", GPIO_PIN_NSS);
-    debugToggleSxPin("SCK", GPIO_PIN_SCK);
-    debugToggleSxPin("MOSI", GPIO_PIN_MOSI);
-    debugToggleSxPin("MISO", GPIO_PIN_MISO);
+    // debugToggleSxPin("NSS", GPIO_PIN_NSS);
+    // debugToggleSxPin("SCK", GPIO_PIN_SCK);
+    // debugToggleSxPin("MOSI", GPIO_PIN_MOSI);
+    // debugToggleSxPin("MISO", GPIO_PIN_MISO);
     debugToggleSxPin("RST", GPIO_PIN_RST);
-    debugToggleSxPin("BUSY", GPIO_PIN_BUSY);
-    debugToggleSxPin("DIO1", GPIO_PIN_DIO1);
+    // debugToggleSxPin("BUSY", GPIO_PIN_BUSY);
+    // debugToggleSxPin("DIO1", GPIO_PIN_DIO1);
     DBGLN("==== SX128x Pin Probe End ====");
 }
 #endif
@@ -1594,7 +1594,7 @@ static void setupRadio()
 {
     ChannelDataReset();
 
-#if defined(DEBUG_ENABLED) && defined(RADIO_SX128X)
+#if defined(RADIO_SX128X)
     debugProbeSxPins();
 #endif
 
