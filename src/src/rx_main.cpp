@@ -1379,7 +1379,7 @@ static void setupSerial()
     }
 
 #if defined(DEBUG_ENABLED)
-#if defined(PLATFORM_ESP32_S3)
+#if defined(PLATFORM_ESP32_S3) || defined(PLATFORM_ESP32_C3)
     USBSerial.begin(460800);
     BackpackOrLogStrm = &USBSerial;
 #else
@@ -2000,9 +2000,11 @@ void resetConfigAndReboot()
     // all this flash write is taking too long
     yield();
     // Remove options.json and hardware.json
+#if !defined(NO_LITTLEFS)
     LittleFS.format();
     yield();
     LittleFS.begin();
+#endif
     options_SetTrueDefaults();
 
     ESP.restart();

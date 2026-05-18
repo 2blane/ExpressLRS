@@ -144,6 +144,7 @@ static String builtinHardwareConfig;
 
 String& getHardware()
 {
+#if !defined(NO_LITTLEFS)
     if (!LittleFS.exists("/hardware.json"))
     {
         // Try JSON at the end of the firmware
@@ -161,6 +162,7 @@ String& getHardware()
         return builtinHardwareConfig;
     }
     builtinHardwareConfig = file.readString();
+#endif
     return builtinHardwareConfig;
 }
 
@@ -227,7 +229,9 @@ bool hardware_init(EspFlashStream &strmFlash)
     Stream *strmSrc;
     JsonDocument doc;
     File file;
+#if !defined(NO_LITTLEFS)
     if (!LittleFS.exists("/hardware.json")) {
+#endif
         constexpr size_t hardwareConfigOffset = ELRSOPTS_PRODUCTNAME_SIZE + ELRSOPTS_DEVICENAME_SIZE + ELRSOPTS_OPTIONS_SIZE;
         strmFlash.setPosition(hardwareConfigOffset);
         if (!options_HasStringInFlash(strmFlash))
@@ -236,6 +240,7 @@ bool hardware_init(EspFlashStream &strmFlash)
         }
 
         strmSrc = &strmFlash;
+#if !defined(NO_LITTLEFS)
     }
     else
     {
@@ -246,6 +251,7 @@ bool hardware_init(EspFlashStream &strmFlash)
         }
         strmSrc = &file;
     }
+#endif
 
     DeserializationError error = deserializeJson(doc, *strmSrc);
     if (error)

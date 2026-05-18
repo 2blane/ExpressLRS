@@ -96,9 +96,11 @@ void saveOptions(Stream &stream, bool customised)
 
 void saveOptions()
 {
+#if !defined(NO_LITTLEFS)
     File options = LittleFS.open("/options.json", "w");
     saveOptions(options, true);
     options.close();
+#endif
 }
 
 /**
@@ -142,6 +144,7 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
     }
 
     // load options.json from the SPIFFS partition
+#if !defined(NO_LITTLEFS)
     if (LittleFS.exists("/options.json"))
     {
         File file = LittleFS.open("/options.json", "r");
@@ -154,6 +157,7 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
             }
         }
     }
+#endif
 
     JsonDocument &doc = flashDoc;
     if (hasFlash && hasSpiffs)
@@ -215,6 +219,7 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
 */
 void options_SetTrueDefaults()
 {
+#if !defined(NO_LITTLEFS)
     JsonDocument doc;
     // The Regulatory Domain is retained, as there is no sensible default
     doc["domain"] = firmwareOptions.domain;
@@ -223,6 +228,7 @@ void options_SetTrueDefaults()
     File options = LittleFS.open("/options.json", "w");
     serializeJson(doc, options);
     options.close();
+#endif
 }
 
 /**
@@ -263,15 +269,19 @@ bool options_init()
 
     uint32_t baseAddr = 0;
 #if defined(PLATFORM_ESP32)
+#if !defined(NO_LITTLEFS)
     LittleFS.begin(true);
+#endif
     const esp_partition_t *runningPart = esp_ota_get_running_partition();
     if (runningPart)
     {
         baseAddr = runningPart->address;
     }
 #else
+#if !defined(NO_LITTLEFS)
     LittleFS.begin();
     // ESP8266 sketch baseAddr is always 0
+#endif
 #endif
 
     EspFlashStream strmFlash;
