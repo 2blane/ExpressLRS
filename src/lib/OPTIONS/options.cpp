@@ -201,7 +201,7 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
     firmwareOptions.uart_baud = doc["rcvr-uart-baud"] | USE_AIRPORT_AT_BAUD;
     firmwareOptions.is_airport = doc["is-airport"] | true;
     #else
-    firmwareOptions.uart_baud = doc["rcvr-uart-baud"] | 115200;
+    firmwareOptions.uart_baud = doc["rcvr-uart-baud"] | 420000;
     firmwareOptions.is_airport = doc["is-airport"] | false;
     #endif
     firmwareOptions.lock_on_first_connection = doc["lock-on-first-connection"] | true;
