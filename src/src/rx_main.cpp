@@ -141,6 +141,7 @@ uint8_t DataUlBuffer[ELRS_DATA_UL_BUFFER];
 
 static uint8_t NextTelemetryType = PACKET_TYPE_LINKSTATS;
 static bool telemBurstValid;
+static bool ReceiverInSwarmMode;
 /// PFD Filters ////////////////
 LPF LPF_Offset(2);
 LPF LPF_OffsetDx(4);
@@ -451,6 +452,11 @@ void ICACHE_RAM_ATTR LinkStatsToOta(OTA_LinkStats_s * const ls)
 
 bool ICACHE_RAM_ATTR HandleSendDataDl()
 {
+    if (ReceiverInSwarmMode)
+    {
+        return false;
+    }
+
     uint8_t modresult = OtaNonce % ExpressLRS_currTlmDenom;
 
     if ((connectionState == disconnected) || (ExpressLRS_currTlmDenom == 1) || (alreadyTLMresp == true) || (modresult != 0) || !teamraceHasModelMatch)
@@ -874,7 +880,7 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_RC(OTA_Packet_s const * const otaPkt
 {
     // Must be fully connected to process RC packets, prevents processing RC
     // during sync, where packets can be received before connection
-    if (connectionState != connected || SwitchModePending)
+    if (connectionState != connected || SwitchModePending || ReceiverInSwarmMode)
         return;
 
     bool telemetryConfirmValue = OtaUnpackChannelData(otaPktPtr, ChannelData);
@@ -934,7 +940,7 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
         packageIndex = otaPktPtr->full.data_ul.packageIndex;
         payload = otaPktPtr->full.data_ul.payload;
         dataLen = sizeof(otaPktPtr->full.data_ul.payload);
-        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
+        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK && !ReceiverInSwarmMode)
         {
             DataDlSender.ConfirmCurrentPayload(otaPktPtr->full.data_ul.stubbornAck);
         }
@@ -944,7 +950,7 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
         packageIndex = otaPktPtr->std.data_ul.packageIndex;
         payload = otaPktPtr->std.data_ul.payload;
         dataLen = sizeof(otaPktPtr->std.data_ul.payload);
-        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
+        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK && !ReceiverInSwarmMode)
         {
             DataDlSender.ConfirmCurrentPayload(otaPktPtr->std.data_ul.stubbornAck);
         }
@@ -1026,7 +1032,9 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     DBGW('s');
 #endif
 
-    if (otaSync->otaProtocol == TX_MAVLINK_MODE)
+    ReceiverInSwarmMode = isSwarmMode(otaSync->otaProtocol);
+
+    if (isMavlinkTransportMode(otaSync->otaProtocol))
     {
         config.SetSerialProtocol(PROTOCOL_MAVLINK);
     }
@@ -1239,6 +1247,10 @@ void DataUlReceiveComplete()
         }
         break;
     default:
+        if (ReceiverInSwarmMode)
+        {
+            break;
+        }
         //handle received CRSF package
         const auto receivedHeader = (crsf_header_t *) DataUlBuffer;
         crsfRouter.processMessage(&otaConnector, receivedHeader);
@@ -2168,12 +2180,12 @@ void loop()
     }
 
     uint8_t nextPlayloadSize = 0;
-    if (!DataDlSender.IsActive() && otaConnector.GetNextPayload(&nextPlayloadSize, DataDlBuffer))
+    if (!ReceiverInSwarmMode && !DataDlSender.IsActive() && otaConnector.GetNextPayload(&nextPlayloadSize, DataDlBuffer))
     {
         DataDlSender.SetDataToTransmit(DataDlBuffer, nextPlayloadSize);
     }
 
-    if (config.GetSerialProtocol() == PROTOCOL_MAVLINK && !DataDlSender.IsActive() && ((SerialMavlink *)serialIO)->GetNextPayload(&nextPlayloadSize, DataDlBuffer))
+    if (!ReceiverInSwarmMode && config.GetSerialProtocol() == PROTOCOL_MAVLINK && !DataDlSender.IsActive() && ((SerialMavlink *)serialIO)->GetNextPayload(&nextPlayloadSize, DataDlBuffer))
     {
         DataDlSender.SetDataToTransmit(DataDlBuffer, nextPlayloadSize);
     }
