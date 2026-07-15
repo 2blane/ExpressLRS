@@ -58,13 +58,14 @@ static char tlmBandwidth[] = " (xxxxxbps)";
 static constexpr char folderNameSeparator[2] = {' ',':'};
 static constexpr char tlmRatios[] = "Std;Off;1:128;1:64;1:32;1:16;1:8;1:4;1:2;Race";
 static constexpr char tlmRatiosMav[] = ";;;;;;;;1:2;";
+static constexpr char tlmRatiosSwarm[] = ";Off;;;;;;;;";
 static constexpr char switchmodeOpts4ch[] = "Wide;Hybrid";
 static constexpr char switchmodeOpts4chMav[] = ";Hybrid";
 static constexpr char switchmodeOpts8ch[] = "8ch;16ch Rate/2;12ch Mixed";
 static constexpr char switchmodeOpts8chMav[] = ";16ch Rate/2;";
 static constexpr char antennamodeOpts[] = "Gemini;Ant 1;Ant 2;Switch";
 static constexpr char antennamodeOptsDualBand[] = "Gemini;;;";
-static constexpr char linkModeOpts[] = "Normal;MAVLink";
+static constexpr char linkModeOpts[] = "Normal;MAVLink;Swarm";
 static constexpr char luastrDvrAux[] = "Off;" STR_LUA_ALLAUX_UPDOWN;
 static constexpr char luastrDvrDelay[] = "0s;5s;15s;30s;45s;1min;2min";
 static constexpr char luastrHeadTrackingEnable[] = "Off;On;" STR_LUA_ALLAUX_UPDOWN;
@@ -653,7 +654,8 @@ void TXModuleEndpoint::SetPacketRateIdx(uint8_t idx, bool forceChange)
   // Don't allow the switch mode to change if the TX is in mavlink mode
   // Wide switch mode is not compatible with mavlink, and the switch mode is
   // autoconfigured when entering mavlink mode
-  bool isMavlinkMode = config.GetLinkMode() == TX_MAVLINK_MODE;
+  const uint8_t linkMode = config.GetLinkMode();
+  bool isMavlinkMode = isMavlinkTransportMode(linkMode);
   if (forceChange || (newSwitchMode == OtaSwitchModeCurrent) || (isDisconnected && !isMavlinkMode))
   {
     // This must be deferred because this can be called from any thread.
@@ -681,7 +683,7 @@ void TXModuleEndpoint::SetSwitchMode(uint8_t idx)
   // Don't allow the switch mode to change if the TX is in mavlink mode
   // Wide switchmode is not compatible with mavlink, and the switchmode is
   // auto-configured when entering mavlink mode
-  bool isMavlinkMode = config.GetLinkMode() == TX_MAVLINK_MODE;
+  bool isMavlinkMode = isMavlinkTransportMode(config.GetLinkMode());
   if (isDisconnected && !isMavlinkMode)
   {
     config.SetSwitchMode(idx);
@@ -705,7 +707,7 @@ void TXModuleEndpoint::SetTlmRatio(uint8_t idx)
   const auto eRatio = (expresslrs_tlm_ratio_e)idx;
   if (eRatio <= TLM_RATIO_DISARMED)
   {
-    const bool isMavlinkMode = config.GetLinkMode() == TX_MAVLINK_MODE;
+    const bool isMavlinkMode = isMavlinkTransportMode(config.GetLinkMode());
     // Don't allow TLM ratio changes if using AIRPORT or Mavlink
     if (!firmwareOptions.is_airport && !isMavlinkMode)
     {
@@ -989,7 +991,8 @@ void TXModuleEndpoint::registerParameters()
 
 void TXModuleEndpoint::updateParameters()
 {
-  bool isMavlinkMode = config.GetLinkMode() == TX_MAVLINK_MODE;
+  const uint8_t linkMode = config.GetLinkMode();
+  bool isMavlinkMode = isMavlinkTransportMode(linkMode);
   uint8_t currentRate = adjustPacketRateForBaud(config.GetRate());
 #if defined(RADIO_LR1121)
   // calculate currentRfBand from current packet-rate
@@ -1000,7 +1003,7 @@ void TXModuleEndpoint::updateParameters()
   setTextSelectionValue(&luaAirRate, RATE_MAX - 1 - currentRate);
 
   setTextSelectionValue(&luaTlmRate, config.GetTlm());
-  luaTlmRate.options = isMavlinkMode ? tlmRatiosMav : tlmRatios;
+  luaTlmRate.options = isSwarmMode(linkMode) ? tlmRatiosSwarm : (isMavlinkMode ? tlmRatiosMav : tlmRatios);
 
   luaAntenna.options = RadioBandMod::isBDUAL(get_elrs_airRateConfig(config.GetRate())->radio_type) ? antennamodeOptsDualBand : antennamodeOpts;
 

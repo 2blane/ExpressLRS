@@ -513,12 +513,18 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
   // *Do* send data if a packet has never been received from handset and the timer is running
   // this is the case when bench testing and TXing without a handset
   bool dontSendChannelData = false;
+  const bool swarmMode = isSwarmMode(config.GetLinkMode());
+  const bool mavlinkTransportMode = isMavlinkTransportMode(config.GetLinkMode());
   uint32_t lastRcData = handset->GetRCdataLastRecv();
+  if (swarmMode)
+  {
+    dontSendChannelData = true;
+  }
   if (lastRcData && (micros() - lastRcData > 1000000))
   {
     // The tx is in Mavlink mode and without a valid crsf or RC input.  Do not send stale or fake zero packet RC!
     // Only send SYNC and DATA packets.
-    if (config.GetLinkMode() == TX_MAVLINK_MODE)
+    if (mavlinkTransportMode)
     {
       dontSendChannelData = true;
     }
@@ -572,7 +578,7 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
         otaPkt.full.data_ul.packageIndex = DataUlSender.GetCurrentPayload(
           otaPkt.full.data_ul.payload,
           sizeof(otaPkt.full.data_ul.payload));
-        if (config.GetLinkMode() == TX_MAVLINK_MODE)
+        if (mavlinkTransportMode && !swarmMode)
           otaPkt.full.data_ul.stubbornAck = DataDlReceiver.GetCurrentConfirm();
       }
       else
@@ -580,7 +586,7 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
         otaPkt.std.data_ul.packageIndex = DataUlSender.GetCurrentPayload(
           otaPkt.std.data_ul.payload,
           sizeof(otaPkt.std.data_ul.payload));
-        if (config.GetLinkMode() == TX_MAVLINK_MODE)
+        if (mavlinkTransportMode && !swarmMode)
           otaPkt.std.data_ul.stubbornAck = DataDlReceiver.GetCurrentConfirm();
       }
 
@@ -589,9 +595,12 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
       // counter can be increased even for normal DataUl messages since it's reset if a real bind message should be sent
       BindingSendCount++;
       // If not in TlmBurst, request a sync packet soon to trigger higher download bandwidth for reply
-      if (syncTelemBoostState == stbIdle)
-        syncSpamCounter = 1;
-      syncTelemBoostState = stbRequested;
+      if (!swarmMode)
+      {
+        if (syncTelemBoostState == stbIdle)
+          syncSpamCounter = 1;
+        syncTelemBoostState = stbRequested;
+      }
     }
     else
     {
@@ -1154,7 +1163,7 @@ static void HandleUARTin()
 
     // If the data is MAVLink, then auto change LinkMode and start the radio link
     // since the user might be operating the module as a standalone unit without a handset.
-    if (connectionState == noCrossfire)
+    if (connectionState == noCrossfire && !isMavlinkTransportMode(config.GetLinkMode()))
     {
       if (isThisAMavPacket(buf, size))
       {
@@ -1162,7 +1171,7 @@ static void HandleUARTin()
         UARTconnected();
       }
     }
-    if (config.GetLinkMode() == TX_MAVLINK_MODE)
+    if (isMavlinkTransportMode(config.GetLinkMode()))
     {
       uartInputBuffer.lock();
       uartInputBuffer.pushBytes(buf, size);
@@ -1186,7 +1195,7 @@ static void HandleUARTin()
       BackpackOrLogStrm->readBytes(buf, size);
 
       // If the TX is in Mavlink mode, push the bytes into the fifo buffer
-      if (config.GetLinkMode() == TX_MAVLINK_MODE)
+      if (isMavlinkTransportMode(config.GetLinkMode()))
       {
         uartInputBuffer.lock();
         uartInputBuffer.pushBytes(buf, size);
@@ -1208,7 +1217,7 @@ static void HandleUARTin()
     }
   }
 
-  if (config.GetLinkMode() == TX_MAVLINK_MODE)
+  if (isMavlinkTransportMode(config.GetLinkMode()))
   {
     // Use DataUlSender for MAVLINK uplink data
     uint8_t *nextPayload = 0;

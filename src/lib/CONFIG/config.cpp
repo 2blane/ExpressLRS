@@ -566,10 +566,14 @@ TxConfig::SetLinkMode(uint8_t linkMode)
     {
         m_model->linkMode = linkMode;
 
-        if (linkMode == TX_MAVLINK_MODE)
+        if (isMavlinkTransportMode(linkMode))
         {
-            m_model->tlm = TLM_RATIO_1_2;
+            m_model->tlm = isSwarmMode(linkMode) ? TLM_RATIO_NO_TLM : TLM_RATIO_1_2;
             m_model->switchMode = smHybridOr16ch; // Force Hybrid / 16ch/2 switch modes for mavlink
+            if (isSwarmMode(linkMode))
+            {
+                m_model->modelMatch = false;
+            }
         }
         m_modified |= EVENT_CONFIG_MODEL_CHANGED | EVENT_CONFIG_MAIN_CHANGED;
     }
