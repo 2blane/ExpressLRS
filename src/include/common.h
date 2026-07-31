@@ -127,18 +127,7 @@ typedef enum : uint8_t
 {
     TX_NORMAL_MODE      = 0,
     TX_MAVLINK_MODE     = 1,
-    TX_SWARM_MODE       = 2,
 } tx_transmission_mode_e;
-
-static inline bool isMavlinkTransportMode(uint8_t linkMode)
-{
-    return linkMode == TX_MAVLINK_MODE || linkMode == TX_SWARM_MODE;
-}
-
-static inline bool isSwarmMode(uint8_t linkMode)
-{
-    return linkMode == TX_SWARM_MODE;
-}
 
 // Value used for expresslrs_rf_pref_params_s.DynpowerUpThresholdSnr if SNR should not be used
 #define DYNPOWER_SNR_THRESH_NONE -127
