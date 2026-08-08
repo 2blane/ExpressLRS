@@ -263,6 +263,52 @@ constexpr uint8_t LEDSEQ_UPDATE[] = { 20, 5, 5, 5, 5, 40 };   // 200ms on, 2x 50
 
 static blinkyColor_t blinkyColor;
 
+#if defined(TARGET_TX) && defined(STARBOUND_RANGER)
+extern volatile uint32_t starboundRangerTransmitFlashUntil;
+extern volatile uint32_t starboundRangerTransmitColor;
+extern volatile bool starboundRangerEmergencyActive;
+static uint32_t starboundRangerStartupAt;
+
+static int starboundRangerStatusLED()
+{
+    const uint32_t now = millis();
+    const uint32_t startupElapsed = now - starboundRangerStartupAt;
+    if (startupElapsed < 2000U)
+    {
+        blinkyColor.s = 255;
+        if (startupElapsed < 1100U)
+        {
+            blinkyColor.h = (startupElapsed * 255U) / 1100U;
+            blinkyColor.v = 160;
+        }
+        else if (startupElapsed < 1400U)
+        {
+            blinkyColor.h = 255;
+            blinkyColor.v = 160U - ((startupElapsed - 1100U) * 160U) / 300U;
+        }
+        else
+        {
+            blinkyColor.h = 85;
+            blinkyColor.v = ((startupElapsed - 1400U) * 128U) / 600U;
+        }
+        WS281BsetLED(HsvToRgb(blinkyColor));
+        return 20;
+    }
+
+    if ((int32_t)(starboundRangerTransmitFlashUntil - now) > 0)
+    {
+        WS281BsetLED(starboundRangerTransmitColor);
+        return 50;
+    }
+
+    blinkyColor.h = starboundRangerEmergencyActive ? 0 : 85;
+    blinkyColor.s = 255;
+    blinkyColor.v = 128;
+    WS281BsetLED(HsvToRgb(blinkyColor));
+    return DURATION_NEVER;
+}
+#endif
+
 static int blinkyUpdate() {
     static constexpr uint8_t hueStepValue = 1;
     static constexpr uint8_t lightnessStep = 5;
@@ -385,6 +431,11 @@ static bool initialize()
 
 static int start()
 {
+#if defined(TARGET_TX) && defined(STARBOUND_RANGER)
+    blinkyState = NORMAL;
+    starboundRangerStartupAt = millis();
+    return starboundRangerStatusLED();
+#endif
     blinkyState = STARTUP;
     #if defined(PLATFORM_ESP32)
     // Only do the blinkies if it was NOT a software reboot
@@ -401,6 +452,12 @@ static int start()
 
 static int timeout()
 {
+#if defined(TARGET_TX) && defined(STARBOUND_RANGER)
+    if (connectionState < FAILURE_STATES)
+    {
+        return starboundRangerStatusLED();
+    }
+#endif
     if (blinkyState == STARTUP && connectionState < FAILURE_STATES)
     {
         return blinkyUpdate();

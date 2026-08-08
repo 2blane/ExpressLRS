@@ -21,6 +21,64 @@ static uint8_t _counter = 0;
 static bool hasRGBLeds = false;
 static bool hasGBLeds = false;
 
+#if defined(TARGET_TX) && defined(STARBOUND_RANGER)
+extern volatile uint32_t starboundRangerTransmitFlashUntil;
+extern volatile uint32_t starboundRangerTransmitColor;
+extern volatile bool starboundRangerEmergencyActive;
+static uint32_t starboundRangerStartupAt;
+
+static void setStarboundRangerRgb(uint32_t color)
+{
+    const bool red = (color & 0xFF0000) != 0;
+    const bool green = (color & 0x00FF00) != 0;
+    const bool blue = (color & 0x0000FF) != 0;
+
+    if (hasRGBLeds)
+    {
+        digitalWrite(GPIO_PIN_LED_GREEN, green ? (HIGH ^ GPIO_LED_GREEN_INVERTED) : (LOW ^ GPIO_LED_GREEN_INVERTED));
+        digitalWrite(GPIO_PIN_LED_RED, red ? (HIGH ^ GPIO_LED_RED_INVERTED) : (LOW ^ GPIO_LED_RED_INVERTED));
+        digitalWrite(GPIO_PIN_LED_BLUE, blue ? (HIGH ^ GPIO_LED_BLUE_INVERTED) : (LOW ^ GPIO_LED_BLUE_INVERTED));
+    }
+    else
+    {
+        if (GPIO_PIN_LED_GREEN != UNDEF_PIN)
+        {
+            digitalWrite(GPIO_PIN_LED_GREEN, green ? (HIGH ^ GPIO_LED_GREEN_INVERTED) : (LOW ^ GPIO_LED_GREEN_INVERTED));
+        }
+        if (GPIO_PIN_LED_RED != UNDEF_PIN)
+        {
+            digitalWrite(GPIO_PIN_LED_RED, red ? (HIGH ^ GPIO_LED_RED_INVERTED) : (LOW ^ GPIO_LED_RED_INVERTED));
+        }
+        if (GPIO_PIN_LED_BLUE != UNDEF_PIN)
+        {
+            digitalWrite(GPIO_PIN_LED_BLUE, blue ? (HIGH ^ GPIO_LED_BLUE_INVERTED) : (LOW ^ GPIO_LED_BLUE_INVERTED));
+        }
+    }
+}
+
+static int starboundRangerStatusLED()
+{
+    const uint32_t now = millis();
+    const uint32_t startupElapsed = now - starboundRangerStartupAt;
+    if (startupElapsed < 2000U)
+    {
+        static constexpr uint32_t startupColors[] = {
+            0xFF0000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0x0000FF, 0xFF00FF, 0x000000, 0x00FF00
+        };
+        static constexpr uint8_t startupColorCount = sizeof(startupColors) / sizeof(startupColors[0]);
+        const uint8_t colorIndex = min((uint32_t)(startupColorCount - 1),
+            startupElapsed * startupColorCount / 2000U);
+        setStarboundRangerRgb(startupColors[colorIndex]);
+        return 50;
+    }
+
+    const bool transmitting = (int32_t)(starboundRangerTransmitFlashUntil - now) > 0;
+    const uint32_t idleColor = starboundRangerEmergencyActive ? 0xFF0000 : 0x00FF00;
+    setStarboundRangerRgb(transmitting ? starboundRangerTransmitColor : idleColor);
+    return transmitting ? 50 : DURATION_NEVER;
+}
+#endif
+
 static uint16_t updateLED()
 {
     if (_pin == UNDEF_PIN)
@@ -118,6 +176,12 @@ static void setPowerLEDs()
 
 static int event()
 {
+#if defined(TARGET_TX) && defined(STARBOUND_RANGER)
+    if (connectionState < FAILURE_STATES)
+    {
+        return starboundRangerStatusLED();
+    }
+#endif
     #if defined(TARGET_TX)
         setPowerLEDs();
     #else
@@ -218,6 +282,10 @@ static int event()
 
 static int start()
 {
+#if defined(TARGET_TX) && defined(STARBOUND_RANGER)
+    starboundRangerStartupAt = millis();
+    return starboundRangerStatusLED();
+#endif
     return event();
 }
 

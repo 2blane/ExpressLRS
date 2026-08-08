@@ -55,6 +55,37 @@ FIFO<UART_INPUT_BUF_LEN> uartInputBuffer;
 
 uint8_t mavlinkSSBuffer[CRSF_MAX_PACKET_LEN]; // Buffer for current stubbon sender packet (mavlink only)
 
+#if defined(STARBOUND_RANGER)
+static volatile bool starboundRangerHasSeenMavlink = false;
+volatile uint32_t starboundRangerTransmitFlashUntil = 0;
+volatile uint32_t starboundRangerTransmitColor = 0xFFFF00;
+volatile bool starboundRangerEmergencyActive = false;
+constexpr uint8_t STARBOUND_RANGER_QUEUE_DEPTH = 8;
+struct StarboundRangerQueuedFrame
+{
+  uint8_t size;
+  uint8_t data[ELRS_DATA_UL_BUFFER];
+};
+static StarboundRangerQueuedFrame starboundRangerQueue[STARBOUND_RANGER_QUEUE_DEPTH];
+static volatile uint8_t starboundRangerQueueRead = 0;
+static volatile uint8_t starboundRangerQueueWrite = 0;
+static volatile uint8_t starboundRangerQueueCount = 0;
+static volatile uint32_t starboundRangerUsbBytes = 0;
+static volatile uint32_t starboundRangerMavlinkFrames = 0;
+static volatile uint32_t starboundRangerQueueDrops = 0;
+static volatile uint32_t starboundRangerParserResets = 0;
+static volatile uint32_t starboundRangerRfPackets = 0;
+static volatile uint32_t starboundRangerTxDone = 0;
+#if defined(PLATFORM_ESP32)
+static portMUX_TYPE starboundRangerQueueMux = portMUX_INITIALIZER_UNLOCKED;
+#endif
+static uint8_t starboundRangerActiveData[ELRS_DATA_UL_BUFFER];
+static uint8_t starboundRangerActiveDataSize = 0;
+static uint8_t starboundRangerActiveDataOffset = 0;
+static uint8_t starboundRangerActivePackage = 1;
+static bool starboundRangerActiveFinalBlank = false;
+#endif
+
 extern bool webserverPreventAutoStart;
 //// MSP Data Handling ///////
 bool NextPacketIsDataUl = false;  // if true the next packet will contain the uplink data (instead of channels)
@@ -72,9 +103,334 @@ static enum { stbIdle, stbRequested, stbBoosting } syncTelemBoostState = stbIdle
 ////////////////////////////////////////////////
 
 static uint32_t LastTLMpacketRecv_Ms = 0;
+#if !defined(STARBOUND_RANGER)
 static uint32_t LinkStatsLastReported_Ms = 0;
+#endif
 static uint32_t RxDisconnected_Ms = 0;
 static bool commitInProgress = false;
+
+#if defined(STARBOUND_RANGER)
+static uint8_t starboundRangerMavlinkFrame[280];
+static uint16_t starboundRangerMavlinkFrameLen = 0;
+static uint32_t starboundRangerMavlinkLastByteUs = 0;
+
+static uint16_t starboundRangerX25CrcAccumulate(uint8_t data, uint16_t crc)
+{
+  data ^= crc & 0xff;
+  data ^= data << 4;
+  return ((((uint16_t)data << 8) | (crc >> 8)) ^ (uint8_t)(data >> 4) ^ ((uint16_t)data << 3));
+}
+
+static uint16_t starboundRangerMavlink2Crc(const uint8_t *frame, uint8_t payloadLen, uint8_t crcExtra)
+{
+  uint16_t crc = 0xffff;
+  for (uint16_t i = 1; i < 10U + payloadLen; ++i)
+  {
+    crc = starboundRangerX25CrcAccumulate(frame[i], crc);
+  }
+  return starboundRangerX25CrcAccumulate(crcExtra, crc);
+}
+
+static void starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t frameLen)
+{
+  constexpr uint32_t MAVLINK_MSG_ID_COMMAND_LONG = 76;
+  constexpr uint32_t MAVLINK_MSG_ID_LED_CONTROL = 186;
+  constexpr uint8_t MAVLINK_COMMAND_LONG_CRC_EXTRA = 152;
+  constexpr uint8_t MAVLINK_LED_CONTROL_CRC_EXTRA = 72;
+  constexpr uint16_t MAVLINK_COMMAND_NAV_RETURN_TO_LAUNCH = 20;
+  constexpr uint16_t MAVLINK_COMMAND_NAV_LAND = 21;
+  constexpr uint16_t MAVLINK_COMMAND_COMPONENT_ARM_DISARM = 400;
+  constexpr float MAVLINK_FORCE_ARM_DISARM = 21196.0f;
+  constexpr uint8_t LED_CONTROL_TARGET_SYSTEM = 0;
+  constexpr uint8_t LED_CONTROL_TARGET_COMPONENT = 0;
+  constexpr uint8_t LED_CONTROL_INSTANCE_SKYBRUSH = 42;
+  constexpr uint8_t LED_CONTROL_PATTERN_SKYBRUSH = 42;
+  constexpr uint8_t LED_CONTROL_CUSTOM_LEN_RGB = 6;
+
+  // Every complete MAVLink packet gets a transmit indication. LED_CONTROL
+  // packets replace yellow with the color carried by the command below.
+  starboundRangerTransmitColor = 0xFFFF00;
+  starboundRangerTransmitFlashUntil = millis() + 150;
+  devicesTriggerEvent(EVENT_CONNECTION_CHANGED);
+
+  const uint8_t payloadLen = frame[1];
+  const uint32_t msgId = (uint32_t)frame[7] | ((uint32_t)frame[8] << 8) | ((uint32_t)frame[9] << 16);
+  if (msgId == MAVLINK_MSG_ID_COMMAND_LONG && payloadLen >= 33 && frameLen >= 10U + payloadLen + 2U)
+  {
+    const uint16_t expectedCrc = starboundRangerMavlink2Crc(frame, payloadLen, MAVLINK_COMMAND_LONG_CRC_EXTRA);
+    const uint16_t receivedCrc = (uint16_t)frame[10 + payloadLen] | ((uint16_t)frame[11 + payloadLen] << 8);
+    if (expectedCrc == receivedCrc)
+    {
+      const uint8_t *payload = frame + 10;
+      const uint16_t command = (uint16_t)payload[28] | ((uint16_t)payload[29] << 8);
+      float armValue;
+      float forceValue;
+      memcpy(&armValue, payload, sizeof(armValue));
+      memcpy(&forceValue, payload + sizeof(float), sizeof(forceValue));
+      const bool isKillMotors = command == MAVLINK_COMMAND_COMPONENT_ARM_DISARM &&
+        armValue == 0.0f && forceValue == MAVLINK_FORCE_ARM_DISARM;
+      if (command == MAVLINK_COMMAND_NAV_RETURN_TO_LAUNCH ||
+          command == MAVLINK_COMMAND_NAV_LAND || isKillMotors)
+      {
+        starboundRangerEmergencyActive = true;
+        starboundRangerTransmitColor = 0xFF0000;
+        starboundRangerTransmitFlashUntil = millis() + 300;
+        devicesTriggerEvent(EVENT_CONNECTION_CHANGED);
+        return;
+      }
+    }
+  }
+
+  if (msgId != MAVLINK_MSG_ID_LED_CONTROL || payloadLen < 11 || frameLen < 10U + payloadLen + 2U)
+  {
+    return;
+  }
+
+  const uint16_t expectedCrc = starboundRangerMavlink2Crc(frame, payloadLen, MAVLINK_LED_CONTROL_CRC_EXTRA);
+  const uint16_t receivedCrc = (uint16_t)frame[10 + payloadLen] | ((uint16_t)frame[11 + payloadLen] << 8);
+  if (expectedCrc != receivedCrc)
+  {
+    return;
+  }
+
+  const uint8_t *payload = frame + 10;
+  if (payload[0] != LED_CONTROL_TARGET_SYSTEM ||
+      payload[1] != LED_CONTROL_TARGET_COMPONENT ||
+      payload[2] != LED_CONTROL_INSTANCE_SKYBRUSH ||
+      payload[3] != LED_CONTROL_PATTERN_SKYBRUSH ||
+      payload[4] < LED_CONTROL_CUSTOM_LEN_RGB)
+  {
+    return;
+  }
+
+  starboundRangerTransmitColor = ((uint32_t)payload[5] << 16) | ((uint32_t)payload[6] << 8) | payload[7];
+  starboundRangerTransmitFlashUntil = millis() + 150;
+}
+
+static void starboundRangerQueueMavlinkFrame(const uint8_t *frame, uint16_t frameLen)
+{
+  const uint16_t queuedSize = frameLen + CRSF_FRAME_NOT_COUNTED_BYTES;
+  if (queuedSize > ELRS_DATA_UL_BUFFER)
+  {
+    return;
+  }
+
+#if defined(PLATFORM_ESP32)
+  portENTER_CRITICAL(&starboundRangerQueueMux);
+#else
+  noInterrupts();
+#endif
+  // Keep the newest commands if USB briefly outruns the RF link.
+  if (starboundRangerQueueCount == STARBOUND_RANGER_QUEUE_DEPTH)
+  {
+    starboundRangerQueueRead = (starboundRangerQueueRead + 1) % STARBOUND_RANGER_QUEUE_DEPTH;
+    --starboundRangerQueueCount;
+    ++starboundRangerQueueDrops;
+  }
+
+  StarboundRangerQueuedFrame &queued = starboundRangerQueue[starboundRangerQueueWrite];
+  queued.data[0] = MSP_ELRS_MAVLINK_TLM;
+  queued.data[1] = frameLen;
+  memcpy(queued.data + CRSF_FRAME_NOT_COUNTED_BYTES, frame, frameLen);
+  queued.size = queuedSize;
+  starboundRangerQueueWrite = (starboundRangerQueueWrite + 1) % STARBOUND_RANGER_QUEUE_DEPTH;
+  ++starboundRangerQueueCount;
+#if defined(PLATFORM_ESP32)
+  portEXIT_CRITICAL(&starboundRangerQueueMux);
+#else
+  interrupts();
+#endif
+  starboundRangerHasSeenMavlink = true;
+  ++starboundRangerMavlinkFrames;
+}
+
+static bool ICACHE_RAM_ATTR starboundRangerPackDataUl(OTA_Packet_s *otaPkt)
+{
+  if (starboundRangerActiveDataSize == 0)
+  {
+#if defined(PLATFORM_ESP32)
+    portENTER_CRITICAL_ISR(&starboundRangerQueueMux);
+#else
+    noInterrupts();
+#endif
+    if (starboundRangerQueueCount > 0)
+    {
+      const StarboundRangerQueuedFrame &queued = starboundRangerQueue[starboundRangerQueueRead];
+      memcpy(starboundRangerActiveData, queued.data, queued.size);
+      starboundRangerActiveDataSize = queued.size;
+      starboundRangerQueueRead = (starboundRangerQueueRead + 1) % STARBOUND_RANGER_QUEUE_DEPTH;
+      --starboundRangerQueueCount;
+    }
+#if defined(PLATFORM_ESP32)
+    portEXIT_CRITICAL_ISR(&starboundRangerQueueMux);
+#else
+    interrupts();
+#endif
+
+    if (starboundRangerActiveDataSize > 0)
+    {
+    starboundRangerActiveDataOffset = 0;
+    starboundRangerActivePackage = 1;
+    starboundRangerActiveFinalBlank = false;
+    }
+  }
+
+  if (starboundRangerActiveDataSize == 0)
+  {
+    return false;
+  }
+
+  uint8_t *payload;
+  uint8_t payloadSize;
+  if (OtaIsFullRes)
+  {
+    otaPkt->full.data_ul.packetType = PACKET_TYPE_DATA;
+    otaPkt->full.data_ul.stubbornAck = 0;
+    payload = otaPkt->full.data_ul.payload;
+    payloadSize = sizeof(otaPkt->full.data_ul.payload);
+  }
+  else
+  {
+    otaPkt->std.type = PACKET_TYPE_DATA;
+    otaPkt->std.data_ul.stubbornAck = 0;
+    payload = otaPkt->std.data_ul.payload;
+    payloadSize = sizeof(otaPkt->std.data_ul.payload);
+  }
+
+  memset(payload, 0, payloadSize);
+
+  uint8_t packageIndex = 0;
+  if (!starboundRangerActiveFinalBlank)
+  {
+    const uint8_t bytesRemaining = starboundRangerActiveDataSize - starboundRangerActiveDataOffset;
+    const uint8_t bytesThisPacket = std::min(bytesRemaining, payloadSize);
+    memcpy(payload, starboundRangerActiveData + starboundRangerActiveDataOffset, bytesThisPacket);
+    starboundRangerActiveDataOffset += bytesThisPacket;
+
+    const bool finished = starboundRangerActiveDataOffset >= starboundRangerActiveDataSize;
+    if (finished && starboundRangerActivePackage > 1)
+    {
+      packageIndex = 0;
+      starboundRangerActiveDataSize = 0;
+    }
+    else
+    {
+      packageIndex = starboundRangerActivePackage++;
+      if (finished)
+      {
+        starboundRangerActiveFinalBlank = true;
+      }
+    }
+  }
+  else
+  {
+    starboundRangerActiveDataSize = 0;
+  }
+
+  if (OtaIsFullRes)
+  {
+    otaPkt->full.data_ul.packageIndex = packageIndex;
+  }
+  else
+  {
+    otaPkt->std.data_ul.packageIndex = packageIndex;
+  }
+
+  return true;
+}
+
+static void starboundRangerObserveMavlink(const uint8_t *buffer, uint16_t bufferSize)
+{
+  constexpr uint8_t MAVLINK2_STX = 0xfd;
+  constexpr uint8_t MAVLINK2_IFLAG_SIGNED = 0x01;
+  constexpr uint32_t MAVLINK_INTERBYTE_TIMEOUT_US = 5000;
+  const uint32_t now = micros();
+  if (starboundRangerMavlinkFrameLen > 0 &&
+      (uint32_t)(now - starboundRangerMavlinkLastByteUs) > MAVLINK_INTERBYTE_TIMEOUT_US)
+  {
+    starboundRangerMavlinkFrameLen = 0;
+    ++starboundRangerParserResets;
+  }
+
+  starboundRangerUsbBytes += bufferSize;
+
+  for (uint16_t i = 0; i < bufferSize; ++i)
+  {
+    const uint8_t c = buffer[i];
+    if (starboundRangerMavlinkFrameLen == 0)
+    {
+      if (c != MAVLINK2_STX)
+      {
+        continue;
+      }
+      starboundRangerMavlinkFrame[starboundRangerMavlinkFrameLen++] = c;
+      continue;
+    }
+
+    if (starboundRangerMavlinkFrameLen >= sizeof(starboundRangerMavlinkFrame))
+    {
+      starboundRangerMavlinkFrameLen = 0;
+      continue;
+    }
+
+    starboundRangerMavlinkFrame[starboundRangerMavlinkFrameLen++] = c;
+    if (starboundRangerMavlinkFrameLen < 2)
+    {
+      continue;
+    }
+
+    const uint8_t payloadLen = starboundRangerMavlinkFrame[1];
+    const uint16_t frameLen = 10U + payloadLen + 2U +
+      ((starboundRangerMavlinkFrameLen > 2 && (starboundRangerMavlinkFrame[2] & MAVLINK2_IFLAG_SIGNED)) ? 13U : 0U);
+    if (frameLen > sizeof(starboundRangerMavlinkFrame))
+    {
+      starboundRangerMavlinkFrameLen = 0;
+      continue;
+    }
+    if (starboundRangerMavlinkFrameLen < frameLen)
+    {
+      continue;
+    }
+
+    starboundRangerInspectMavlinkFrame(starboundRangerMavlinkFrame, frameLen);
+    starboundRangerQueueMavlinkFrame(starboundRangerMavlinkFrame, frameLen);
+    starboundRangerMavlinkFrameLen = 0;
+  }
+  if (bufferSize > 0)
+  {
+    starboundRangerMavlinkLastByteUs = now;
+  }
+}
+
+static void starboundRangerSendDiagnostics()
+{
+  extern volatile bool busyTransmitting;
+  static uint32_t lastReportMs = 0;
+  static uint32_t lastFrameCount = 0;
+  const uint32_t now = millis();
+  const uint32_t frameCount = starboundRangerMavlinkFrames;
+  if (frameCount == lastFrameCount && (uint32_t)(now - lastReportMs) < 1000U)
+  {
+    return;
+  }
+
+  lastFrameCount = frameCount;
+  lastReportMs = now;
+  TxUSB->printf(
+    "SBDBG ms=%lu usb=%lu frames=%lu queue=%u drops=%lu resets=%lu rf=%lu done=%lu busy=%u partial=%u color=%06lX\r\n",
+    (unsigned long)now,
+    (unsigned long)starboundRangerUsbBytes,
+    (unsigned long)frameCount,
+    (unsigned)starboundRangerQueueCount,
+    (unsigned long)starboundRangerQueueDrops,
+    (unsigned long)starboundRangerParserResets,
+    (unsigned long)starboundRangerRfPackets,
+    (unsigned long)starboundRangerTxDone,
+    busyTransmitting ? 1U : 0U,
+    (unsigned)starboundRangerMavlinkFrameLen,
+    (unsigned long)(starboundRangerTransmitColor & 0xFFFFFF));
+}
+#endif
 
 LQCALC<100> LqTQly;
 
@@ -513,12 +869,19 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
   // *Do* send data if a packet has never been received from handset and the timer is running
   // this is the case when bench testing and TXing without a handset
   bool dontSendChannelData = false;
+#if defined(STARBOUND_RANGER)
+  dontSendChannelData = true;
+#endif
   uint32_t lastRcData = handset->GetRCdataLastRecv();
   if (lastRcData && (micros() - lastRcData > 1000000))
   {
     // The tx is in Mavlink mode and without a valid crsf or RC input.  Do not send stale or fake zero packet RC!
     // Only send SYNC and DATA packets.
-    if (config.GetLinkMode() == TX_MAVLINK_MODE)
+    if (config.GetLinkMode() == TX_MAVLINK_MODE
+#if defined(STARBOUND_RANGER)
+      && starboundRangerHasSeenMavlink
+#endif
+      )
     {
       dontSendChannelData = true;
     }
@@ -530,9 +893,10 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
 
   busyTransmitting = true;
 
-  uint32_t const now = millis();
   // ESP requires word aligned buffer
   WORD_ALIGNED_ATTR OTA_Packet_s otaPkt = {0};
+#if !defined(STARBOUND_RANGER)
+  uint32_t const now = millis();
   static uint8_t syncSlot;
 
   const bool isTlmDisarmed = config.GetTlm() == TLM_RATIO_DISARMED;
@@ -559,6 +923,7 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
     syncSlot = (syncSlot + 1) % (ExpressLRS_currAirRate_Modparams->FHSShopInterval * 2);
   }
   else
+#endif
   {
     if (firmwareOptions.is_airport)
     {
@@ -566,6 +931,13 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
     }
     else if ((NextPacketIsDataUl && DataUlSender.IsActive()) || dontSendChannelData)
     {
+#if defined(STARBOUND_RANGER)
+      if (!starboundRangerPackDataUl(&otaPkt))
+      {
+        busyTransmitting = false;
+        return;
+      }
+#else
       otaPkt.std.type = PACKET_TYPE_DATA;
       if (OtaIsFullRes)
       {
@@ -583,6 +955,7 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
         if (config.GetLinkMode() == TX_MAVLINK_MODE)
           otaPkt.std.data_ul.stubbornAck = DataDlReceiver.GetCurrentConfirm();
       }
+#endif
 
       // send channel data next so the channel messages also get sent during data uplink transmissions
       NextPacketIsDataUl = false;
@@ -638,6 +1011,9 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
   else
 #endif
   {
+#if defined(STARBOUND_RANGER)
+    ++starboundRangerRfPackets;
+#endif
     Radio.TXnb((uint8_t*)&otaPkt, false, (uint8_t*)&otaPkt, transmittingRadio);
   }
 }
@@ -645,6 +1021,9 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
 void ICACHE_RAM_ATTR nonceAdvance()
 {
   OtaNonce++;
+#if defined(STARBOUND_RANGER)
+  return;
+#endif
   if ((OtaNonce + 1) % ExpressLRS_currAirRate_Modparams->FHSShopInterval == 0)
   {
     ++FHSSptr;
@@ -725,6 +1104,11 @@ static void UARTconnected()
 
   auto index = adjustPacketRateForBaud(config.GetRate());
   config.SetRate(index);
+#if defined(STARBOUND_RANGER)
+  config.SetLinkMode(TX_MAVLINK_MODE);
+  config.SetTlm(TLM_RATIO_NO_TLM);
+  setConnectionState(disconnected);
+#else
   if (connectionState == noCrossfire || connectionState < MODE_STATES)
   {
     // When CRSF first connects, always go into a brief delay before
@@ -732,6 +1116,7 @@ static void UARTconnected()
     // right behind it
     setConnectionState(awaitingModelId);
   }
+#endif
   // But start the timer to get OpenTX sync going and a ModelID update sent
   hwTimer::resume();
 }
@@ -843,6 +1228,12 @@ void ICACHE_RAM_ATTR TXdoneISR()
   {
     return; // Already finished transmission and do not call HandleFHSS() a second time, which may hop the frequency!
   }
+
+#if defined(STARBOUND_RANGER)
+  ++starboundRangerTxDone;
+  busyTransmitting = false;
+  return;
+#endif
 
   if (connectionState != awaitingModelId)
   {
@@ -1003,6 +1394,10 @@ void SendUIDOverMSP()
 
 static void EnterBindingMode()
 {
+#if defined(STARBOUND_RANGER)
+  return;
+#endif
+
   if (InBindingMode)
       return;
 
@@ -1146,6 +1541,16 @@ static void HandleUARTin()
   // USB serial input
   // If a mavlink packet is received on the USB input, automatically switch the link mode to and process as mavlink
   // Otherwise, USB serial data is processed as CRSF
+#if defined(STARBOUND_RANGER)
+  constexpr uint16_t STARBOUND_USB_READ_SIZE = 128;
+  const uint16_t size = std::min(STARBOUND_USB_READ_SIZE, (uint16_t)TxUSB->available());
+  if (size > 0)
+  {
+    uint8_t buf[STARBOUND_USB_READ_SIZE];
+    const uint16_t bytesRead = TxUSB->readBytes(buf, size);
+    starboundRangerObserveMavlink(buf, bytesRead);
+  }
+#else
   auto size = std::min(uartInputBuffer.free(), (uint16_t)TxUSB->available());
   if (size > 0)
   {
@@ -1173,10 +1578,12 @@ static void HandleUARTin()
       crsfParser.processBytes(&usbConnector, buf, size);
     }
   }
+#endif
 
   // Backpack serial input
   // Backpack will not switch modes, but will process data as mavlink if the link mode is already set to mavlink
   // Backpack serial data is ALSO always processed as backpack MSP
+#if !defined(STARBOUND_RANGER)
   if (BackpackOrLogStrm != TxUSB && BackpackOrLogStrm->available())
   {
     auto size = std::min(uartInputBuffer.free(), (uint16_t)BackpackOrLogStrm->available());
@@ -1207,10 +1614,12 @@ static void HandleUARTin()
       ParseMSPData(buf, size);
     }
   }
+#endif
 
   if (config.GetLinkMode() == TX_MAVLINK_MODE)
   {
     // Use DataUlSender for MAVLINK uplink data
+#if !defined(STARBOUND_RANGER)
     uint8_t *nextPayload = 0;
     uint8_t nextPlayloadSize = 0;
     uint16_t count = uartInputBuffer.size();
@@ -1227,6 +1636,7 @@ static void HandleUARTin()
       nextPlayloadSize = count + CRSF_FRAME_NOT_COUNTED_BYTES;
       DataUlSender.SetDataToTransmit(nextPayload, nextPlayloadSize);
     }
+#endif
   }
 }
 
@@ -1336,6 +1746,9 @@ bool setupHardwareFromOptions()
     setConnectionState(hardwareUndefined);
     return false;
   }
+#if defined(STARBOUND_RANGER)
+  firmwareOptions.uart_baud = 460800;
+#endif
   return true;
 }
 
@@ -1378,6 +1791,7 @@ static void cyclePower()
   }
 }
 
+#if !defined(STARBOUND_RANGER)
 static void checkSendLinkStatsToHandset(uint32_t now)
 {
   if ((now - LinkStatsLastReported_Ms) > firmwareOptions.tlm_report_interval)
@@ -1403,6 +1817,7 @@ static void checkSendLinkStatsToHandset(uint32_t now)
     LinkStatsLastReported_Ms = now;
   }
 }
+#endif
 
 void setup()
 {
@@ -1432,6 +1847,12 @@ void setup()
     eeprom.Begin(); // Init the eeprom
     config.SetStorageProvider(&eeprom); // Pass pointer to the Config class for access to storage
     config.Load(); // Load the stored values from eeprom
+#if defined(STARBOUND_RANGER)
+    config.SetLinkMode(TX_MAVLINK_MODE);
+    config.SetTlm(TLM_RATIO_NO_TLM);
+    config.SetDynamicPower(0);
+    config.SetAntennaMode(TX_RADIO_MODE_ANT_1);
+#endif
 
     Radio.currFreq = FHSSgetInitialFreq(); //set frequency first or an error will occur!!!
     #if defined(RADIO_SX127X)
@@ -1468,7 +1889,11 @@ void setup()
 
       LbtCcaTimerStart();
       hwTimer::init(nullptr, timerCallback);
+#if defined(STARBOUND_RANGER)
+      UARTconnected();
+#else
       setConnectionState(noCrossfire);
+#endif
     }
   }
   else
@@ -1507,6 +1932,9 @@ void loop()
 
   if (connectionState < MODE_STATES)
   {
+#if defined(STARBOUND_RANGER)
+    if (starboundRangerHasSeenMavlink)
+#endif
     UpdateConnectDisconnectStatus();
   }
 
@@ -1521,6 +1949,10 @@ void loop()
 
   HandleUARTin();
 
+#if defined(STARBOUND_RANGER)
+  starboundRangerSendDiagnostics();
+#endif
+
   if (connectionState > MODE_STATES)
   {
     return;
@@ -1528,10 +1960,13 @@ void loop()
 
   CheckReadyToSend();
   CheckConfigChangePending();
+#if !defined(STARBOUND_RANGER)
   DynamicPower_Update(now);
   VtxPitmodeSwitchUpdate();
   checkSendLinkStatsToHandset(now);
+#endif
 
+#if !defined(STARBOUND_RANGER)
   if (DataDlReceiver.HasFinishedData())
   {
       if (CRSFinBuffer[0] == CRSF_ADDRESS_USB)
@@ -1558,6 +1993,7 @@ void loop()
       }
       DataDlReceiver.Unlock();
   }
+#endif
 
   // only send Uplink data when binding is not active
   if (InBindingMode)
@@ -1575,8 +2011,10 @@ void loop()
       ExitBindingMode();
     }
   }
+#if !defined(STARBOUND_RANGER)
   else if (!DataUlSender.IsActive())
   {
     otaConnector.pumpSender();
   }
+#endif
 }
