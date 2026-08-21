@@ -8,10 +8,63 @@
 
 #define MAVLINK_RC_PACKET_INTERVAL 10
 
-#define MAVLINK_COMM_NUM_BUFFERS 1
+#define MAVLINK_COMM_NUM_BUFFERS 2
 #include "common/mavlink.h"
 
 #define MAV_FTP_OPCODE_OPENFILERO 4
+
+#if defined(STARBOUND_RECEIVER)
+extern void starboundReceiverSetBroadcastMode(bool enabled);
+extern bool starboundReceiverIsBroadcastMode();
+
+static bool processStarboundModeCommand(const mavlink_message_t &msg)
+{
+    constexpr float ELRS_MODE_CHANGE = 8.0f;
+    constexpr float ELRS_NORMAL_MODE = 0.0f;
+    constexpr float ELRS_BROADCAST_RECEIVE_MODE = 2.0f;
+
+    uint16_t commandId;
+    float marker;
+    float requestedMode;
+    if (msg.msgid == MAVLINK_MSG_ID_COMMAND_INT)
+    {
+        mavlink_command_int_t command{};
+        mavlink_msg_command_int_decode(&msg, &command);
+        commandId = command.command;
+        marker = command.param1;
+        requestedMode = command.param2;
+    }
+    else if (msg.msgid == MAVLINK_MSG_ID_COMMAND_LONG)
+    {
+        mavlink_command_long_t command{};
+        mavlink_msg_command_long_decode(&msg, &command);
+        commandId = command.command;
+        marker = command.param1;
+        requestedMode = command.param2;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (commandId != MAV_CMD_USER_1 || marker != ELRS_MODE_CHANGE)
+    {
+        return false;
+    }
+
+    if (requestedMode == ELRS_NORMAL_MODE)
+    {
+        starboundReceiverSetBroadcastMode(false);
+        return true;
+    }
+    if (requestedMode == ELRS_BROADCAST_RECEIVE_MODE)
+    {
+        starboundReceiverSetBroadcastMode(true);
+        return true;
+    }
+    return false;
+}
+#endif
 
 SerialMavlink::SerialMavlink(Stream &out, Stream &in):
     SerialIO(&out, &in),
@@ -71,6 +124,25 @@ int SerialMavlink::getMaxSerialReadSize()
 
 void SerialMavlink::processBytes(uint8_t *bytes, u_int16_t size)
 {
+#if defined(STARBOUND_RECEIVER)
+    bool handledModeCommand = false;
+    for (uint16_t i = 0; i < size; ++i)
+    {
+        mavlink_message_t msg;
+        mavlink_status_t status;
+        if (mavlink_frame_char(MAVLINK_COMM_1, bytes[i], &msg, &status) == MAVLINK_FRAMING_OK)
+        {
+            handledModeCommand |= processStarboundModeCommand(msg);
+        }
+    }
+
+    // Local flight-controller traffic must never enter the RF downlink while
+    // receive-only mode is active. Also consume the mode command locally.
+    if (starboundReceiverIsBroadcastMode() || handledModeCommand)
+    {
+        return;
+    }
+#endif
     if (connectionState == connected)
     {
         mavlinkInputBuffer.atomicPushBytes(bytes, size);
@@ -163,6 +235,12 @@ bool SerialMavlink::GetNextPayload(uint8_t* nextPayloadSize, uint8_t *payloadDat
     mavlinkInputBuffer.popBytes(payloadData + CRSF_FRAME_NOT_COUNTED_BYTES, count);
     *nextPayloadSize = count + CRSF_FRAME_NOT_COUNTED_BYTES;
     return true;
+}
+
+void SerialMavlink::ResetState()
+{
+    mavlinkInputBuffer.flush();
+    mavlinkOutputBuffer.flush();
 }
 
 #endif // defined(TARGET_RX)

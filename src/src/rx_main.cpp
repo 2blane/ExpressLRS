@@ -141,6 +141,12 @@ uint8_t DataUlBuffer[ELRS_DATA_UL_BUFFER];
 
 static uint8_t NextTelemetryType = PACKET_TYPE_LINKSTATS;
 static bool telemBurstValid;
+#if defined(STARBOUND_RECEIVER)
+// Set this to false to boot in normal bidirectional ELRS mode instead.
+static constexpr bool StarboundBroadcastModeDefault = true;
+static volatile bool ReceiverInBroadcastMode;
+static uint8_t StarboundNormalUid[UID_LEN];
+#endif
 /// PFD Filters ////////////////
 LPF LPF_Offset(2);
 LPF LPF_OffsetDx(4);
@@ -451,6 +457,13 @@ void ICACHE_RAM_ATTR LinkStatsToOta(OTA_LinkStats_s * const ls)
 
 bool ICACHE_RAM_ATTR HandleSendDataDl()
 {
+#if defined(STARBOUND_RECEIVER)
+    if (ReceiverInBroadcastMode)
+    {
+        return false;
+    }
+#endif
+
     uint8_t modresult = OtaNonce % ExpressLRS_currTlmDenom;
 
     if ((connectionState == disconnected) || (ExpressLRS_currTlmDenom == 1) || (alreadyTLMresp == true) || (modresult != 0) || !teamraceHasModelMatch)
@@ -874,7 +887,11 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_RC(OTA_Packet_s const * const otaPkt
 {
     // Must be fully connected to process RC packets, prevents processing RC
     // during sync, where packets can be received before connection
-    if (connectionState != connected || SwitchModePending)
+    if (connectionState != connected || SwitchModePending
+#if defined(STARBOUND_RECEIVER)
+        || ReceiverInBroadcastMode
+#endif
+        )
         return;
 
     bool telemetryConfirmValue = OtaUnpackChannelData(otaPktPtr, ChannelData);
@@ -934,7 +951,11 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
         packageIndex = otaPktPtr->full.data_ul.packageIndex;
         payload = otaPktPtr->full.data_ul.payload;
         dataLen = sizeof(otaPktPtr->full.data_ul.payload);
-        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
+        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK
+#if defined(STARBOUND_RECEIVER)
+            && !ReceiverInBroadcastMode
+#endif
+            )
         {
             DataDlSender.ConfirmCurrentPayload(otaPktPtr->full.data_ul.stubbornAck);
         }
@@ -944,7 +965,11 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
         packageIndex = otaPktPtr->std.data_ul.packageIndex;
         payload = otaPktPtr->std.data_ul.payload;
         dataLen = sizeof(otaPktPtr->std.data_ul.payload);
-        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
+        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK
+#if defined(STARBOUND_RECEIVER)
+            && !ReceiverInBroadcastMode
+#endif
+            )
         {
             DataDlSender.ConfirmCurrentPayload(otaPktPtr->std.data_ul.stubbornAck);
         }
@@ -960,7 +985,11 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
 
     // Must be fully connected to process uplink data, prevents processing data
     // during sync, where packets can be received before connection
-    if (connectionState == connected)
+    if (connectionState == connected
+#if defined(STARBOUND_RECEIVER)
+        || ReceiverInBroadcastMode
+#endif
+        )
     {
         DataUlReceiver.ReceiveData(packageIndex, payload, dataLen);
     }
@@ -1084,6 +1113,37 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     return false;
 }
 
+#if defined(STARBOUND_RECEIVER)
+static bool ICACHE_RAM_ATTR starboundValidateBroadcastPacket(OTA_Packet_s * const otaPktPtr)
+{
+    const uint8_t originalNonce = OtaNonce;
+    const uint8_t originalCrcHigh = otaPktPtr->std.crcHigh;
+    const uint8_t originalCrcLow = otaPktPtr->std.crcLow;
+
+    // The Ranger intentionally sends no SYNC packets, so its rolling OTA nonce
+    // is unknown when a receiver enters broadcast mode. The nonce is only eight
+    // bits; test it locally while retaining the normal ELRS CRC and UID checks.
+    for (uint16_t nonce = 0; nonce <= UINT8_MAX; ++nonce)
+    {
+        OtaNonce = nonce;
+        otaPktPtr->std.crcHigh = originalCrcHigh;
+        otaPktPtr->std.crcLow = originalCrcLow;
+        if (OtaValidatePacketCrc(otaPktPtr))
+        {
+            otaPktPtr->std.crcHigh = originalCrcHigh;
+            otaPktPtr->std.crcLow = originalCrcLow;
+            OtaNonce = originalNonce;
+            return true;
+        }
+    }
+
+    otaPktPtr->std.crcHigh = originalCrcHigh;
+    otaPktPtr->std.crcLow = originalCrcLow;
+    OtaNonce = originalNonce;
+    return false;
+}
+#endif
+
 bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
 {
     if (status != SX12xxDriverCommon::SX12XX_RX_OK)
@@ -1092,6 +1152,12 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
         #if defined(DEBUG_RX_SCOREBOARD)
             lastPacketCrcError = true;
         #endif
+#if defined(STARBOUND_RECEIVER)
+        if (ReceiverInBroadcastMode)
+        {
+            Radio.RXnb();
+        }
+#endif
         return false;
     }
     uint32_t const beginProcessing = micros();
@@ -1099,14 +1165,40 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
     OTA_Packet_s * const otaPktPtr = (OTA_Packet_s * const)Radio.RXdataBuffer;
     OTA_Packet_s * const otaPktPtrSecond = (OTA_Packet_s * const)Radio.RXdataBufferSecond;
 
-    if (!OtaValidatePacketCrc(otaPktPtr))
+    if (!(
+#if defined(STARBOUND_RECEIVER)
+        ReceiverInBroadcastMode ? starboundValidateBroadcastPacket(otaPktPtr) :
+#endif
+        OtaValidatePacketCrc(otaPktPtr)))
     {
         DBGVLN("CRC error");
         #if defined(DEBUG_RX_SCOREBOARD)
             lastPacketCrcError = true;
         #endif
+#if defined(STARBOUND_RECEIVER)
+        if (ReceiverInBroadcastMode)
+        {
+            Radio.RXnb();
+        }
+#endif
         return false;
     }
+
+#if defined(STARBOUND_RECEIVER)
+    if (ReceiverInBroadcastMode)
+    {
+        if (otaPktPtr->std.type == PACKET_TYPE_DATA)
+        {
+            ProcessRfPacket_DataUl(otaPktPtr);
+            Radio.GetLastPacketStats();
+            getRFlinkInfo();
+        }
+        // There is no timer or telemetry slot in receive-only mode. Explicitly
+        // re-arm RX after every packet so the radio can hear the next fragment.
+        Radio.RXnb();
+        return true;
+    }
+#endif
 
     // The extEvent defines where TOCK timer ISR is to be synced to, i.e. where the packet period begins.
     // For rates where the TOA is longer than half the packet period schedule the TOCK for rougly 1x TOA before
@@ -1239,6 +1331,12 @@ void DataUlReceiveComplete()
         }
         break;
     default:
+#if defined(STARBOUND_RECEIVER)
+        if (ReceiverInBroadcastMode)
+        {
+            break;
+        }
+#endif
         //handle received CRSF package
         const auto receivedHeader = (crsf_header_t *) DataUlBuffer;
         crsfRouter.processMessage(&otaConnector, receivedHeader);
@@ -1641,6 +1739,68 @@ static void setupRadio()
     // to connect before beginning rate cycling
     RFmodeCycleMultiplier = RFmodeCycleMultiplierSlow / 2;
 }
+
+#if defined(STARBOUND_RECEIVER)
+bool starboundReceiverIsBroadcastMode()
+{
+    return ReceiverInBroadcastMode;
+}
+
+void starboundReceiverSetBroadcastMode(bool enabled)
+{
+    if (ReceiverInBroadcastMode == enabled || InBindingMode)
+    {
+        return;
+    }
+
+    DataUlReceiver.ResetState();
+    DataDlSender.ResetState();
+    otaConnector.ResetState();
+    if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
+    {
+        ((SerialMavlink *)serialIO)->ResetState();
+    }
+
+    if (enabled)
+    {
+        // Tear down all synchronized/bidirectional behavior before locking to
+        // the Ranger's fixed initial channel and 250 Hz LoRa packet profile.
+        LostConnection(false);
+        memcpy(StarboundNormalUid, UID, UID_LEN);
+        if (firmwareOptions.hasUID)
+        {
+            memcpy(UID, firmwareOptions.uid, UID_LEN);
+        }
+        OtaUpdateCrcInitFromUid();
+        FHSSrandomiseFHSSsequence(OtaGetUidSeed());
+        ReceiverInBroadcastMode = true;
+        SetRFLinkRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ), false);
+        OtaNonce = 0;
+        setConnectionState(disconnected);
+        Radio.RXnb();
+        DBGLN("Starbound broadcast receive mode");
+        return;
+    }
+
+    ReceiverInBroadcastMode = false;
+    memcpy(UID, StarboundNormalUid, UID_LEN);
+    OtaUpdateCrcInitFromUid();
+    FHSSrandomiseFHSSsequence(OtaGetUidSeed());
+    uint8_t normalRateIndex = config.GetRateInitialIdx();
+    if (!isSupportedRFRate(normalRateIndex))
+    {
+        normalRateIndex = enumRatetoIndexSafe(RATE_LORA_2G4_250HZ);
+    }
+    SetRFLinkRate(normalRateIndex, false);
+    scanIndex = normalRateIndex;
+    RFmodeCycleMultiplier = RFmodeCycleMultiplierSlow / 2;
+    RFmodeLastCycled = millis();
+    LastSyncPacket = 0;
+    setConnectionState(disconnected);
+    Radio.RXnb();
+    DBGLN("Starbound normal ELRS mode");
+}
+#endif
 
 static void updateTelemetryBurst()
 {
@@ -2051,6 +2211,14 @@ void setup()
 
         // Init EEPROM and load config, checking powerup count
         setupConfigAndPocCheck();
+#if defined(STARBOUND_RECEIVER)
+        if (StarboundBroadcastModeDefault)
+        {
+            // Broadcast mode always talks MAVLink to the Starbound STM32.
+            config.SetSerialProtocol(PROTOCOL_MAVLINK);
+            config.Commit();
+        }
+#endif
         setupTarget();
         // If serial is not already defined, then see if there is serial pin configured in the PWM configuration
         if (OPT_HAS_SERVO_OUTPUT && GPIO_PIN_RCSIGNAL_RX == UNDEF_PIN && GPIO_PIN_RCSIGNAL_TX == UNDEF_PIN)
@@ -2087,6 +2255,12 @@ void setup()
             DataUlReceiver.SetDataToReceive(DataUlBuffer, ELRS_DATA_UL_BUFFER);
             Radio.RXnb();
             hwTimer::init(HWtimerCallbackTick, HWtimerCallbackTock);
+#if defined(STARBOUND_RECEIVER)
+            if (StarboundBroadcastModeDefault)
+            {
+                starboundReceiverSetBroadcastMode(true);
+            }
+#endif
         }
     }
 
@@ -2127,6 +2301,15 @@ void loop()
     {
         return;
     }
+
+#if defined(STARBOUND_RECEIVER)
+    if (ReceiverInBroadcastMode)
+    {
+        // Serial input and completed RF frames were handled above. Nothing in
+        // this mode may cycle rates, seek sync, hop, or schedule an RF downlink.
+        return;
+    }
+#endif
 
     if ((connectionState != disconnected) && (ExpressLRS_currAirRate_Modparams->index != ExpressLRS_nextAirRateIndex)) // forced change
     {

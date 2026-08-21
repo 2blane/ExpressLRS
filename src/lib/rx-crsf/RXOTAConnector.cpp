@@ -71,6 +71,15 @@ RXOTAConnector::RXOTAConnector()
     addDevice(CRSF_ADDRESS_CRSF_TRANSMITTER);
 }
 
+void RXOTAConnector::ResetState()
+{
+#if defined(PLATFORM_ESP32) && SOC_CPU_CORES_NUM > 1
+    std::lock_guard<std::mutex> lock(mutex);
+#endif
+    messagePayloads.flush();
+    prioritizedCount = 0;
+}
+
 bool RXOTAConnector::GetNextPayload(uint8_t *nextPayloadSize, uint8_t *payloadData)
 {
 #if defined(PLATFORM_ESP32) && SOC_CPU_CORES_NUM > 1

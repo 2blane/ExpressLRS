@@ -9,6 +9,7 @@ FIRMWARE_NAME="Unified_ESP32C3_2400_RX"
 BUILD_DIR="${SCRIPT_DIR}/.pio/build/${ENV_NAME}"
 OUTPUT_FILE="${SCRIPT_DIR}/elrsCombined.bin"
 ESPTOOL_PY="${HOME}/.platformio/packages/tool-esptoolpy/esptool.py"
+PLATFORMIO_PYTHON="${HOME}/.platformio/penv/bin/python"
 
 usage() {
   echo "Usage: $0"
@@ -31,6 +32,11 @@ if [[ ! -f "${ESPTOOL_PY}" ]]; then
   exit 1
 fi
 
+if [[ ! -x "${PLATFORMIO_PYTHON}" ]]; then
+  echo "Error: PlatformIO Python was not found at ${PLATFORMIO_PYTHON}"
+  exit 1
+fi
+
 echo "Building ${ENV_NAME} with board config ${BOARD_CONFIG_NAME}..."
 cd "${SCRIPT_DIR}"
 
@@ -47,10 +53,11 @@ extra_configs = ${SCRIPT_DIR}/platformio.ini
 board_config = ${BOARD_CONFIG}
 EOF
 
-pio run -c "${TMP_CONF}" -e "${ENV_NAME}"
+PLATFORMIO_BUILD_FLAGS="-DSTARBOUND_RECEIVER ${PLATFORMIO_BUILD_FLAGS:-}" \
+  pio run -c "${TMP_CONF}" -e "${ENV_NAME}"
 
 echo "Merging output binaries into ${OUTPUT_FILE}..."
-python3 "${ESPTOOL_PY}" --chip esp32c3 merge_bin \
+"${PLATFORMIO_PYTHON}" "${ESPTOOL_PY}" --chip esp32c3 merge_bin \
   -o "${OUTPUT_FILE}" \
   0x0 "${BUILD_DIR}/bootloader.bin" \
   0x8000 "${BUILD_DIR}/partitions.bin" \

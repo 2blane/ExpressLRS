@@ -23,6 +23,7 @@ public:
 
     void forwardMessage(const uint8_t *data);
     bool GetNextPayload(uint8_t *nextPayloadSize, uint8_t *payloadData);
+    void ResetState();
 
     void event() override;
 

@@ -22,6 +22,7 @@ public:
     void forwardMessage(const crsf_header_t *message) override;
 
     bool GetNextPayload(uint8_t* nextPayloadSize, uint8_t *payloadData);
+    void ResetState();
     uint8_t GetFifoFullPct() const { return (TELEMETRY_FIFO_SIZE - messagePayloads.free()) * 100 / TELEMETRY_FIFO_SIZE; }
 
 protected:
