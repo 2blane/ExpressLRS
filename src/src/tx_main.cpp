@@ -36,6 +36,10 @@ void sendMAVLinkTelemetryToBackpack(uint8_t *) {}
 #include "TXOTAConnector.h"
 #include "TXUSBConnector.h"
 
+#if defined(STARBOUND_RANGER)
+#include "common/mavlink.h"
+#endif
+
 #if defined(PLATFORM_ESP8266)
 #include <user_interface.h>
 #endif
@@ -131,15 +135,66 @@ static uint16_t starboundRangerMavlink2Crc(const uint8_t *frame, uint8_t payload
   return starboundRangerX25CrcAccumulate(crcExtra, crc);
 }
 
-static void starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t frameLen)
+static bool starboundRangerPowerFromMilliwatts(float milliwatts, PowerLevels_e &power)
 {
-  constexpr uint32_t MAVLINK_MSG_ID_COMMAND_LONG = 76;
-  constexpr uint32_t MAVLINK_MSG_ID_LED_CONTROL = 186;
-  constexpr uint8_t MAVLINK_COMMAND_LONG_CRC_EXTRA = 152;
-  constexpr uint8_t MAVLINK_LED_CONTROL_CRC_EXTRA = 72;
+  struct PowerMapping
+  {
+    uint16_t milliwatts;
+    PowerLevels_e power;
+  };
+  static constexpr PowerMapping mappings[] = {
+    {25, PWR_25mW},
+    {50, PWR_50mW},
+    {100, PWR_100mW},
+    {250, PWR_250mW},
+    {500, PWR_500mW},
+    {1000, PWR_1000mW},
+  };
+
+  for (const PowerMapping &mapping : mappings)
+  {
+    if (milliwatts == mapping.milliwatts &&
+        mapping.power >= POWERMGNT::getMinPower() &&
+        mapping.power <= POWERMGNT::getMaxPower())
+    {
+      power = mapping.power;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void starboundRangerSendCommandAck(uint16_t command, uint8_t result,
+                                          int32_t resultParam,
+                                          uint8_t targetSystem,
+                                          uint8_t targetComponent)
+{
+  mavlink_message_t ack;
+  mavlink_msg_command_ack_pack(
+    255,
+    MAV_COMP_ID_TELEMETRY_RADIO,
+    &ack,
+    command,
+    result,
+    result == MAV_RESULT_ACCEPTED ? 100 : UINT8_MAX,
+    resultParam,
+    targetSystem,
+    targetComponent);
+  uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
+  const uint16_t length = mavlink_msg_to_send_buffer(buffer, &ack);
+  TxUSB->write(buffer, length);
+}
+
+static bool starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t frameLen)
+{
+  constexpr uint32_t STARBOUND_MSG_ID_COMMAND_LONG = 76;
+  constexpr uint32_t STARBOUND_MSG_ID_LED_CONTROL = 186;
+  constexpr uint8_t STARBOUND_COMMAND_LONG_CRC_EXTRA = 152;
+  constexpr uint8_t STARBOUND_LED_CONTROL_CRC_EXTRA = 72;
   constexpr uint16_t MAVLINK_COMMAND_NAV_RETURN_TO_LAUNCH = 20;
   constexpr uint16_t MAVLINK_COMMAND_NAV_LAND = 21;
   constexpr uint16_t MAVLINK_COMMAND_COMPONENT_ARM_DISARM = 400;
+  constexpr uint16_t MAVLINK_COMMAND_SET_RANGER_POWER = MAV_CMD_USER_2;
   constexpr float MAVLINK_FORCE_ARM_DISARM = 21196.0f;
   constexpr uint8_t LED_CONTROL_TARGET_SYSTEM = 0;
   constexpr uint8_t LED_CONTROL_TARGET_COMPONENT = 0;
@@ -155,9 +210,9 @@ static void starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t fr
 
   const uint8_t payloadLen = frame[1];
   const uint32_t msgId = (uint32_t)frame[7] | ((uint32_t)frame[8] << 8) | ((uint32_t)frame[9] << 16);
-  if (msgId == MAVLINK_MSG_ID_COMMAND_LONG && payloadLen >= 33 && frameLen >= 10U + payloadLen + 2U)
+  if (msgId == STARBOUND_MSG_ID_COMMAND_LONG && payloadLen >= 33 && frameLen >= 10U + payloadLen + 2U)
   {
-    const uint16_t expectedCrc = starboundRangerMavlink2Crc(frame, payloadLen, MAVLINK_COMMAND_LONG_CRC_EXTRA);
+    const uint16_t expectedCrc = starboundRangerMavlink2Crc(frame, payloadLen, STARBOUND_COMMAND_LONG_CRC_EXTRA);
     const uint16_t receivedCrc = (uint16_t)frame[10 + payloadLen] | ((uint16_t)frame[11 + payloadLen] << 8);
     if (expectedCrc == receivedCrc)
     {
@@ -167,6 +222,29 @@ static void starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t fr
       float forceValue;
       memcpy(&armValue, payload, sizeof(armValue));
       memcpy(&forceValue, payload + sizeof(float), sizeof(forceValue));
+
+      if (command == MAVLINK_COMMAND_SET_RANGER_POWER)
+      {
+        PowerLevels_e requestedPower;
+        const bool validPower = starboundRangerPowerFromMilliwatts(armValue, requestedPower);
+        if (validPower)
+        {
+          config.SetPower(requestedPower);
+          POWERMGNT::setPower(requestedPower);
+          config.Commit();
+          starboundRangerTransmitColor = 0xFFFFFF;
+          starboundRangerTransmitFlashUntil = millis() + 300;
+          devicesTriggerEvent(EVENT_CONNECTION_CHANGED);
+        }
+        starboundRangerSendCommandAck(
+          command,
+          validPower ? MAV_RESULT_ACCEPTED : MAV_RESULT_DENIED,
+          (int32_t)armValue,
+          frame[5],
+          frame[6]);
+        return true;
+      }
+
       const bool isKillMotors = command == MAVLINK_COMMAND_COMPONENT_ARM_DISARM &&
         armValue == 0.0f && forceValue == MAVLINK_FORCE_ARM_DISARM;
       if (command == MAVLINK_COMMAND_NAV_RETURN_TO_LAUNCH ||
@@ -176,21 +254,21 @@ static void starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t fr
         starboundRangerTransmitColor = 0xFF0000;
         starboundRangerTransmitFlashUntil = millis() + 300;
         devicesTriggerEvent(EVENT_CONNECTION_CHANGED);
-        return;
+        return false;
       }
     }
   }
 
-  if (msgId != MAVLINK_MSG_ID_LED_CONTROL || payloadLen < 11 || frameLen < 10U + payloadLen + 2U)
+  if (msgId != STARBOUND_MSG_ID_LED_CONTROL || payloadLen < 11 || frameLen < 10U + payloadLen + 2U)
   {
-    return;
+    return false;
   }
 
-  const uint16_t expectedCrc = starboundRangerMavlink2Crc(frame, payloadLen, MAVLINK_LED_CONTROL_CRC_EXTRA);
+  const uint16_t expectedCrc = starboundRangerMavlink2Crc(frame, payloadLen, STARBOUND_LED_CONTROL_CRC_EXTRA);
   const uint16_t receivedCrc = (uint16_t)frame[10 + payloadLen] | ((uint16_t)frame[11 + payloadLen] << 8);
   if (expectedCrc != receivedCrc)
   {
-    return;
+    return false;
   }
 
   const uint8_t *payload = frame + 10;
@@ -200,11 +278,12 @@ static void starboundRangerInspectMavlinkFrame(const uint8_t *frame, uint16_t fr
       payload[3] != LED_CONTROL_PATTERN_SKYBRUSH ||
       payload[4] < LED_CONTROL_CUSTOM_LEN_RGB)
   {
-    return;
+    return false;
   }
 
   starboundRangerTransmitColor = ((uint32_t)payload[5] << 16) | ((uint32_t)payload[6] << 8) | payload[7];
   starboundRangerTransmitFlashUntil = millis() + 150;
+  return false;
 }
 
 static void starboundRangerQueueMavlinkFrame(const uint8_t *frame, uint16_t frameLen)
@@ -392,8 +471,15 @@ static void starboundRangerObserveMavlink(const uint8_t *buffer, uint16_t buffer
       continue;
     }
 
-    starboundRangerInspectMavlinkFrame(starboundRangerMavlinkFrame, frameLen);
-    starboundRangerQueueMavlinkFrame(starboundRangerMavlinkFrame, frameLen);
+    const bool consumedLocally = starboundRangerInspectMavlinkFrame(starboundRangerMavlinkFrame, frameLen);
+    if (consumedLocally)
+    {
+      ++starboundRangerMavlinkFrames;
+    }
+    else
+    {
+      starboundRangerQueueMavlinkFrame(starboundRangerMavlinkFrame, frameLen);
+    }
     starboundRangerMavlinkFrameLen = 0;
   }
   if (bufferSize > 0)
@@ -417,7 +503,7 @@ static void starboundRangerSendDiagnostics()
   lastFrameCount = frameCount;
   lastReportMs = now;
   TxUSB->printf(
-    "SBDBG ms=%lu usb=%lu frames=%lu queue=%u drops=%lu resets=%lu rf=%lu done=%lu busy=%u partial=%u color=%06lX\r\n",
+    "SBDBG ms=%lu usb=%lu frames=%lu queue=%u drops=%lu resets=%lu rf=%lu done=%lu busy=%u partial=%u color=%06lX rate=%u switch=%u freq=%lu iq=%u power=%u uid=%u,%u,%u,%u,%u,%u\r\n",
     (unsigned long)now,
     (unsigned long)starboundRangerUsbBytes,
     (unsigned long)frameCount,
@@ -428,7 +514,18 @@ static void starboundRangerSendDiagnostics()
     (unsigned long)starboundRangerTxDone,
     busyTransmitting ? 1U : 0U,
     (unsigned)starboundRangerMavlinkFrameLen,
-    (unsigned long)(starboundRangerTransmitColor & 0xFFFFFF));
+    (unsigned long)(starboundRangerTransmitColor & 0xFFFFFF),
+    (unsigned)config.GetRate(),
+    (unsigned)config.GetSwitchMode(),
+    (unsigned long)Radio.currFreq,
+    Radio.IQinverted ? 1U : 0U,
+    (unsigned)config.GetPower(),
+    (unsigned)UID[0],
+    (unsigned)UID[1],
+    (unsigned)UID[2],
+    (unsigned)UID[3],
+    (unsigned)UID[4],
+    (unsigned)UID[5]);
 }
 #endif
 
@@ -1106,6 +1203,8 @@ static void UARTconnected()
   config.SetRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ));
   config.SetLinkMode(TX_MAVLINK_MODE);
   config.SetTlm(TLM_RATIO_NO_TLM);
+  config.SetSwitchMode(smWideOr8ch);
+  config.SetModelMatch(false);
   setConnectionState(disconnected);
 #else
   auto index = adjustPacketRateForBaud(config.GetRate());
@@ -1854,6 +1953,13 @@ void setup()
     config.SetRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ));
     config.SetLinkMode(TX_MAVLINK_MODE);
     config.SetTlm(TLM_RATIO_NO_TLM);
+    config.SetSwitchMode(smWideOr8ch);
+    config.SetModelMatch(false);
+    if (config.GetPower() < POWERMGNT::getMinPower() ||
+        config.GetPower() > POWERMGNT::getMaxPower())
+    {
+      config.SetPower(POWERMGNT::getDefaultPower());
+    }
     config.SetDynamicPower(0);
     config.SetAntennaMode(TX_RADIO_MODE_ANT_1);
 #endif
