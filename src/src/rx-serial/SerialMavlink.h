@@ -37,6 +37,9 @@ private:
     const uint8_t target_component_id;
 
     uint32_t lastSentFlowCtrl = 0;
+#if defined(STARBOUND_RECEIVER)
+    uint32_t lastBroadcastMessageReceived = 0;
+#endif
 
     // Variables / constants for Mavlink //
     FIFO<MAV_INPUT_BUF_LEN> mavlinkInputBuffer;

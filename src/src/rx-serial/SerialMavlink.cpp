@@ -16,6 +16,9 @@
 #if defined(STARBOUND_RECEIVER)
 extern void starboundReceiverSetBroadcastMode(bool enabled);
 extern bool starboundReceiverIsBroadcastMode();
+extern uint32_t starboundReceiverLastValidPacket();
+extern uint16_t starboundReceiverHardwareErrors();
+extern uint16_t starboundReceiverCrcErrors();
 
 static bool processStarboundModeCommand(const mavlink_message_t &msg)
 {
@@ -151,24 +154,50 @@ void SerialMavlink::processBytes(uint8_t *bytes, u_int16_t size)
 
 void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
 {
-
-    // Send radio messages at 100Hz
     const uint32_t now = millis();
-    if ((now - lastSentFlowCtrl) > 10)
+#if defined(STARBOUND_RECEIVER)
+    const bool broadcastMode = starboundReceiverIsBroadcastMode();
+    constexpr uint32_t BROADCAST_RADIO_STATUS_INTERVAL = 1000;
+    constexpr uint32_t BROADCAST_SIGNAL_ACTIVE_TIMEOUT = 2000;
+    const uint32_t lastValidBroadcastPacket = starboundReceiverLastValidPacket();
+    const bool broadcastSignalActive = lastValidBroadcastPacket != 0 &&
+        (now - lastValidBroadcastPacket) <= BROADCAST_SIGNAL_ACTIVE_TIMEOUT;
+    const uint32_t radioStatusInterval = broadcastMode ? BROADCAST_RADIO_STATUS_INTERVAL : 10;
+    const uint16_t broadcastHardwareErrors = broadcastMode ? starboundReceiverHardwareErrors() : 0;
+    const uint16_t broadcastCrcErrors = broadcastMode ? starboundReceiverCrcErrors() : 0;
+#else
+    constexpr bool broadcastMode = false;
+    constexpr bool broadcastSignalActive = false;
+    constexpr uint32_t radioStatusInterval = 10;
+    constexpr uint16_t broadcastHardwareErrors = 0;
+    constexpr uint16_t broadcastCrcErrors = 0;
+#endif
+
+    // Normal MAVLink mode retains its 100 Hz flow-control report. Broadcast
+    // mode sends one status per second so the STM32 can verify the UART even
+    // when the Ranger is absent; inactive RF measurements are reported as 0.
+    if ((now - lastSentFlowCtrl) > radioStatusInterval)
     {
         lastSentFlowCtrl = now;
 
         // Software-based flow control for mavlink
         uint8_t percentage_remaining = ((MAV_INPUT_BUF_LEN - mavlinkInputBuffer.size()) * 100) / MAV_INPUT_BUF_LEN;
+        const bool broadcastSignalInactive = broadcastMode && !broadcastSignalActive;
+        const uint8_t statusRssi = broadcastSignalInactive ? uint8_t{0} :
+            (uint8_t)((float)linkStats.uplink_Link_quality * 2.55);
+        const uint8_t statusRemoteRssi = broadcastSignalInactive ? uint8_t{0} :
+            (uint8_t)linkStats.uplink_RSSI_1;
+        const uint8_t statusNoise = broadcastSignalInactive ? uint8_t{0} :
+            (uint8_t)linkStats.uplink_SNR;
 
         // Populate radio status packet
         const mavlink_radio_status_t radio_status {
-            rxerrors: 0,
-            fixed: 0,
-            rssi: (uint8_t)((float)linkStats.uplink_Link_quality * 2.55),
-            remrssi: linkStats.uplink_RSSI_1,
+            rxerrors: broadcastHardwareErrors,
+            fixed: broadcastCrcErrors,
+            rssi: statusRssi,
+            remrssi: statusRemoteRssi,
             txbuf: percentage_remaining,
-            noise: (uint8_t)linkStats.uplink_SNR,
+            noise: statusNoise,
             remnoise: 0,
         };
 
@@ -219,6 +248,12 @@ void SerialMavlink::event()
 
 void SerialMavlink::forwardMessage(const uint8_t *data)
 {
+#if defined(STARBOUND_RECEIVER)
+    if (starboundReceiverIsBroadcastMode())
+    {
+        lastBroadcastMessageReceived = millis();
+    }
+#endif
     mavlinkOutputBuffer.atomicPushBytes(data + 2, data[1]);
 }
 
@@ -241,6 +276,9 @@ void SerialMavlink::ResetState()
 {
     mavlinkInputBuffer.flush();
     mavlinkOutputBuffer.flush();
+#if defined(STARBOUND_RECEIVER)
+    lastBroadcastMessageReceived = 0;
+#endif
 }
 
 #endif // defined(TARGET_RX)

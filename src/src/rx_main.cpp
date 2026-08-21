@@ -146,6 +146,9 @@ static bool telemBurstValid;
 static constexpr bool StarboundBroadcastModeDefault = true;
 static volatile bool ReceiverInBroadcastMode;
 static uint8_t StarboundNormalUid[UID_LEN];
+static volatile uint32_t StarboundBroadcastLastValidPacket;
+static volatile uint32_t StarboundBroadcastHardwareErrors;
+static volatile uint32_t StarboundBroadcastCrcErrors;
 #endif
 /// PFD Filters ////////////////
 LPF LPF_Offset(2);
@@ -1155,6 +1158,7 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
 #if defined(STARBOUND_RECEIVER)
         if (ReceiverInBroadcastMode)
         {
+            ++StarboundBroadcastHardwareErrors;
             Radio.RXnb();
         }
 #endif
@@ -1178,6 +1182,7 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
 #if defined(STARBOUND_RECEIVER)
         if (ReceiverInBroadcastMode)
         {
+            ++StarboundBroadcastCrcErrors;
             Radio.RXnb();
         }
 #endif
@@ -1187,6 +1192,7 @@ bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
 #if defined(STARBOUND_RECEIVER)
     if (ReceiverInBroadcastMode)
     {
+        StarboundBroadcastLastValidPacket = millis();
         if (otaPktPtr->std.type == PACKET_TYPE_DATA)
         {
             ProcessRfPacket_DataUl(otaPktPtr);
@@ -1746,6 +1752,21 @@ bool starboundReceiverIsBroadcastMode()
     return ReceiverInBroadcastMode;
 }
 
+uint32_t starboundReceiverLastValidPacket()
+{
+    return StarboundBroadcastLastValidPacket;
+}
+
+uint16_t starboundReceiverHardwareErrors()
+{
+    return (uint16_t)StarboundBroadcastHardwareErrors;
+}
+
+uint16_t starboundReceiverCrcErrors()
+{
+    return (uint16_t)StarboundBroadcastCrcErrors;
+}
+
 void starboundReceiverSetBroadcastMode(bool enabled)
 {
     if (ReceiverInBroadcastMode == enabled || InBindingMode)
@@ -1773,6 +1794,9 @@ void starboundReceiverSetBroadcastMode(bool enabled)
         }
         OtaUpdateCrcInitFromUid();
         FHSSrandomiseFHSSsequence(OtaGetUidSeed());
+        StarboundBroadcastLastValidPacket = 0;
+        StarboundBroadcastHardwareErrors = 0;
+        StarboundBroadcastCrcErrors = 0;
         ReceiverInBroadcastMode = true;
         SetRFLinkRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ), false);
         OtaNonce = 0;
