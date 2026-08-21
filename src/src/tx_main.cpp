@@ -1102,13 +1102,14 @@ static void UARTconnected()
   webserverPreventAutoStart = true;
   rfModeLastChangedMS = millis(); // force syncspam on first packets
 
-  auto index = adjustPacketRateForBaud(config.GetRate());
-  config.SetRate(index);
 #if defined(STARBOUND_RANGER)
+  config.SetRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ));
   config.SetLinkMode(TX_MAVLINK_MODE);
   config.SetTlm(TLM_RATIO_NO_TLM);
   setConnectionState(disconnected);
 #else
+  auto index = adjustPacketRateForBaud(config.GetRate());
+  config.SetRate(index);
   if (connectionState == noCrossfire || connectionState < MODE_STATES)
   {
     // When CRSF first connects, always go into a brief delay before
@@ -1848,6 +1849,9 @@ void setup()
     config.SetStorageProvider(&eeprom); // Pass pointer to the Config class for access to storage
     config.Load(); // Load the stored values from eeprom
 #if defined(STARBOUND_RANGER)
+    // Broadcast receivers listen continuously on this fixed profile. Ignore a
+    // previously saved packet rate so both ends always agree after power-up.
+    config.SetRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ));
     config.SetLinkMode(TX_MAVLINK_MODE);
     config.SetTlm(TLM_RATIO_NO_TLM);
     config.SetDynamicPower(0);
