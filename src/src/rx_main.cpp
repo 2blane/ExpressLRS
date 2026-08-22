@@ -1396,10 +1396,10 @@ static void setupSerial()
     {
         mavlinkSerialOutput = true;
 #if defined(STARBOUND_RECEIVER)
-        // The Spectra link only carries commands and low-rate status. Using a
-        // standard baud rate gives the onboard STM32 UART substantially more
-        // timing and signal margin than the generic ELRS MAVLink default.
-        serialBaud = 115200;
+        // Match the Starbound flight controller's dedicated ELRS MAVLink port.
+        // Console corruption was caused by competing USB readers, not this
+        // UART rate, so retain the normal ELRS MAVLink baud rate here.
+        serialBaud = 460800;
 #else
         serialBaud = 460800;
 #endif
