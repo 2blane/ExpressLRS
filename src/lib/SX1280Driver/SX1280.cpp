@@ -176,6 +176,14 @@ void SX1280Driver::Config(uint8_t bw, uint8_t sf, uint8_t cr, uint32_t regfreq,
 
     uint16_t dio1Mask = SX1280_IRQ_TX_DONE | SX1280_IRQ_RX_DONE;
     uint16_t irqMask  = SX1280_IRQ_TX_DONE | SX1280_IRQ_RX_DONE | SX1280_IRQ_SYNCWORD_VALID | SX1280_IRQ_SYNCWORD_ERROR | SX1280_IRQ_CRC_ERROR;
+#if defined(STARBOUND_RECEIVER)
+    const uint16_t rxDiagnosticMask = SX1280_IRQ_PREAMBLE_DETECTED |
+        SX1280_IRQ_SYNCWORD_VALID | SX1280_IRQ_SYNCWORD_ERROR |
+        SX1280_IRQ_HEADER_VALID | SX1280_IRQ_HEADER_ERROR |
+        SX1280_IRQ_CRC_ERROR;
+    irqMask |= rxDiagnosticMask;
+    dio1Mask |= rxDiagnosticMask;
+#endif
     SetDioIrqParams(irqMask, dio1Mask);
     SetFIFOaddr(SX1280_TX_BUFFER_BASE, SX1280_RX_BUFFER_BASE);
 }
@@ -535,6 +543,19 @@ void ICACHE_RAM_ATTR SX1280Driver::RXnb()
     SetMode(SX1280_MODE_RX_CONT, SX12XX_Radio_All);
 }
 
+#if defined(STARBOUND_RECEIVER)
+void SX1280Driver::ResetStarboundRxDiagnostics()
+{
+    starboundPreambleCount = 0;
+    starboundSyncValidCount = 0;
+    starboundSyncErrorCount = 0;
+    starboundHeaderValidCount = 0;
+    starboundHeaderErrorCount = 0;
+    starboundRxDoneCount = 0;
+    starboundLastIrqStatus = 0;
+}
+#endif
+
 bool ICACHE_RAM_ATTR SX1280Driver::GetRxBufferAddr(SX12XX_Radio_Number_t radioNumber, uint8_t *rxBufferAddr)
 {
     WORD_ALIGNED_ATTR uint8_t status[2] = {0};
@@ -704,6 +725,15 @@ void ICACHE_RAM_ATTR SX1280Driver::IsrCallback(SX12XX_Radio_Number_t radioNumber
     SX12XX_Radio_Number_t irqClearRadio = radioNumber;
 
     uint16_t irqStatus = instance->GetIrqStatus(radioNumber);
+#if defined(STARBOUND_RECEIVER)
+    instance->starboundLastIrqStatus = irqStatus;
+    instance->starboundPreambleCount += (irqStatus & SX1280_IRQ_PREAMBLE_DETECTED) != 0;
+    instance->starboundSyncValidCount += (irqStatus & SX1280_IRQ_SYNCWORD_VALID) != 0;
+    instance->starboundSyncErrorCount += (irqStatus & SX1280_IRQ_SYNCWORD_ERROR) != 0;
+    instance->starboundHeaderValidCount += (irqStatus & SX1280_IRQ_HEADER_VALID) != 0;
+    instance->starboundHeaderErrorCount += (irqStatus & SX1280_IRQ_HEADER_ERROR) != 0;
+    instance->starboundRxDoneCount += (irqStatus & SX1280_IRQ_RX_DONE) != 0;
+#endif
     if (irqStatus & SX1280_IRQ_TX_DONE)
     {
         RFAMP.TXRXdisable();

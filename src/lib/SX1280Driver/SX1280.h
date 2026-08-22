@@ -42,6 +42,16 @@ public:
     int8_t GetRssiInst(SX12XX_Radio_Number_t radioNumber);
     void GetLastPacketStats();
     void CheckForSecondPacket();
+#if defined(STARBOUND_RECEIVER)
+    void ResetStarboundRxDiagnostics();
+    uint32_t GetStarboundPreambleCount() const { return starboundPreambleCount; }
+    uint32_t GetStarboundSyncValidCount() const { return starboundSyncValidCount; }
+    uint32_t GetStarboundSyncErrorCount() const { return starboundSyncErrorCount; }
+    uint32_t GetStarboundHeaderValidCount() const { return starboundHeaderValidCount; }
+    uint32_t GetStarboundHeaderErrorCount() const { return starboundHeaderErrorCount; }
+    uint32_t GetStarboundRxDoneCount() const { return starboundRxDoneCount; }
+    uint16_t GetStarboundLastIrqStatus() const { return starboundLastIrqStatus; }
+#endif
 
 private:
     // constant used for no power change pending
@@ -56,6 +66,15 @@ private:
     uint8_t pwrCurrent;
     uint8_t pwrPending;
     SX1280_RadioOperatingModes_t fallBackMode;
+#if defined(STARBOUND_RECEIVER)
+    volatile uint32_t starboundPreambleCount = 0;
+    volatile uint32_t starboundSyncValidCount = 0;
+    volatile uint32_t starboundSyncErrorCount = 0;
+    volatile uint32_t starboundHeaderValidCount = 0;
+    volatile uint32_t starboundHeaderErrorCount = 0;
+    volatile uint32_t starboundRxDoneCount = 0;
+    volatile uint16_t starboundLastIrqStatus = 0;
+#endif
 
     void SetMode(SX1280_RadioOperatingModes_t OPmode, SX12XX_Radio_Number_t radioNumber);
     void SetFIFOaddr(uint8_t txBaseAddr, uint8_t rxBaseAddr);

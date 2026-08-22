@@ -146,6 +146,7 @@ static bool telemBurstValid;
 static constexpr bool StarboundBroadcastModeDefault = true;
 static volatile bool ReceiverInBroadcastMode;
 static uint8_t StarboundNormalUid[UID_LEN];
+static bool StarboundNormalWebserverPreventAutoStart;
 static volatile uint32_t StarboundBroadcastLastValidPacket;
 static volatile uint32_t StarboundBroadcastHardwareErrors;
 static volatile uint32_t StarboundBroadcastCrcErrors;
@@ -1394,7 +1395,14 @@ static void setupSerial()
     else if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
     {
         mavlinkSerialOutput = true;
+#if defined(STARBOUND_RECEIVER)
+        // The Spectra link only carries commands and low-rate status. Using a
+        // standard baud rate gives the onboard STM32 UART substantially more
+        // timing and signal margin than the generic ELRS MAVLink default.
+        serialBaud = 115200;
+#else
         serialBaud = 460800;
+#endif
     }
     else if (config.GetSerialProtocol() == PROTOCOL_MSP_DISPLAYPORT)
     {
@@ -1787,6 +1795,11 @@ void starboundReceiverSetBroadcastMode(bool enabled)
         // Tear down all synchronized/bidirectional behavior before locking to
         // the Ranger's fixed initial channel and 250 Hz LoRa packet profile.
         LostConnection(false);
+        StarboundNormalWebserverPreventAutoStart = webserverPreventAutoStart;
+        // Broadcast receive mode intentionally remains disconnected. Without
+        // this guard the normal RX fallback starts Wi-Fi after 60 seconds and
+        // disrupts the RF and high-rate UART stream.
+        webserverPreventAutoStart = true;
         memcpy(StarboundNormalUid, UID, UID_LEN);
         if (firmwareOptions.hasUID)
         {
@@ -1797,6 +1810,7 @@ void starboundReceiverSetBroadcastMode(bool enabled)
         StarboundBroadcastLastValidPacket = 0;
         StarboundBroadcastHardwareErrors = 0;
         StarboundBroadcastCrcErrors = 0;
+        Radio.ResetStarboundRxDiagnostics();
         ReceiverInBroadcastMode = true;
         SetRFLinkRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ), false);
         OtaNonce = 0;
@@ -1807,6 +1821,7 @@ void starboundReceiverSetBroadcastMode(bool enabled)
     }
 
     ReceiverInBroadcastMode = false;
+    webserverPreventAutoStart = StarboundNormalWebserverPreventAutoStart;
     memcpy(UID, StarboundNormalUid, UID_LEN);
     OtaUpdateCrcInitFromUid();
     FHSSrandomiseFHSSsequence(OtaGetUidSeed());

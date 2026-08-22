@@ -5,6 +5,7 @@
 
 #define MAV_INPUT_BUF_LEN       1024
 #define MAV_OUTPUT_BUF_LEN      512
+#define MAV_SERIAL_OUTPUT_BUF_LEN 2048
 #define MAV_PAYLOAD_SIZE_MAX    60
 
 // Variables / constants
@@ -29,6 +30,8 @@ public:
 
 private:
     void processBytes(uint8_t *bytes, u_int16_t size) override;
+    bool queueSerialBytes(const uint8_t *data, uint16_t len);
+    void drainSerialOutput(uint32_t maxBytesToSend);
 
     uint8_t this_system_id;
     const uint8_t this_component_id;
@@ -39,9 +42,12 @@ private:
     uint32_t lastSentFlowCtrl = 0;
 #if defined(STARBOUND_RECEIVER)
     uint32_t lastBroadcastMessageReceived = 0;
+    uint32_t lastBroadcastDiagnostic = 0;
+    uint8_t broadcastDiagnosticPage = 0;
 #endif
 
     // Variables / constants for Mavlink //
     FIFO<MAV_INPUT_BUF_LEN> mavlinkInputBuffer;
     FIFO<MAV_OUTPUT_BUF_LEN> mavlinkOutputBuffer;
+    FIFO<MAV_SERIAL_OUTPUT_BUF_LEN> mavlinkSerialOutputBuffer;
 };
