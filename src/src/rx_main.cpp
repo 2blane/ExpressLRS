@@ -142,9 +142,9 @@ uint8_t DataUlBuffer[ELRS_DATA_UL_BUFFER];
 static uint8_t NextTelemetryType = PACKET_TYPE_LINKSTATS;
 static bool telemBurstValid;
 #if defined(STARBOUND_RECEIVER)
-// Boot in normal bidirectional Pilot mode so the ELRS UART is immediately
-// available for RC/MAVLink bring-up and packet inspection.
-static constexpr bool StarboundBroadcastModeDefault = false;
+// Starbound receivers boot in one-way Broadcast mode for show operations.
+// Pilot mode remains available through the MAVLink mode command.
+static constexpr bool StarboundBroadcastModeDefault = true;
 static volatile bool ReceiverInBroadcastMode;
 static volatile bool StarboundPilotUsesMavlinkOta;
 static uint8_t StarboundNormalUid[UID_LEN];
@@ -1835,6 +1835,12 @@ void starboundReceiverSetBroadcastMode(bool enabled)
         StarboundBroadcastLastValidPacket = 0;
         StarboundBroadcastHardwareErrors = 0;
         StarboundBroadcastCrcErrors = 0;
+        linkStats.uplink_RSSI_1 = 0;
+        linkStats.uplink_RSSI_2 = 0;
+        linkStats.uplink_Link_quality = 0;
+        linkStats.uplink_SNR = 0;
+        LPF_UplinkRSSI0.reset();
+        LPF_UplinkRSSI1.reset();
         Radio.ResetStarboundRxDiagnostics();
         SetRFLinkRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ), false);
         OtaNonce = 0;

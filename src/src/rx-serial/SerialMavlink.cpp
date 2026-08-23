@@ -109,7 +109,10 @@ uint32_t SerialMavlink::sendRCFrame(bool frameAvailable, bool frameMissed, uint3
     // RC traffic or compete with received commands for the flight-controller UART.
     if (starboundReceiverIsBroadcastMode())
     {
-        return DURATION_NEVER;
+        // Keep the device timeout armed while RC output is suppressed. Returning
+        // DURATION_NEVER removes this callback from the scheduler permanently,
+        // so switching back to Pilot mode would never resume RC overrides.
+        return MAVLINK_RC_PACKET_INTERVAL;
     }
 #endif
     if (!frameAvailable) {
@@ -229,10 +232,6 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
 #if defined(STARBOUND_RECEIVER)
     const bool broadcastMode = starboundReceiverIsBroadcastMode();
     constexpr uint32_t BROADCAST_RADIO_STATUS_INTERVAL = 1000;
-    constexpr uint32_t BROADCAST_SIGNAL_ACTIVE_TIMEOUT = 2000;
-    const uint32_t lastValidBroadcastPacket = starboundReceiverLastValidPacket();
-    const bool broadcastSignalActive = lastValidBroadcastPacket != 0 &&
-        (now - lastValidBroadcastPacket) <= BROADCAST_SIGNAL_ACTIVE_TIMEOUT;
     // RADIO_STATUS is state/diagnostic telemetry, not an RC transport clock.
     // Sending it at 100 Hz needlessly competes with the 100 Hz override stream
     // on the flight-controller UART and can exhaust ArduPilot's receive budget.
@@ -243,7 +242,6 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
         ? starboundReceiverCrcErrors() : pilotRcOverridesSent;
 #else
     constexpr bool broadcastMode = false;
-    constexpr bool broadcastSignalActive = false;
     constexpr uint32_t radioStatusInterval = 10;
     constexpr uint16_t statusRxCounter = 0;
     constexpr uint16_t statusTxCounter = 0;
@@ -272,20 +270,26 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
     }
 
     // Both modes report status once per second. Pilot RC overrides retain their
-    // independent 100 Hz cadence; inactive Broadcast RF measurements are 0.
+    // independent 100 Hz cadence. Broadcast keeps the last RF-chip RSSI until
+    // another valid packet arrives; sparse show traffic must not read as 0.
     if ((now - lastSentFlowCtrl) > radioStatusInterval)
     {
         lastSentFlowCtrl = now;
 
         // Software-based flow control for mavlink
         uint8_t percentage_remaining = ((MAV_INPUT_BUF_LEN - mavlinkInputBuffer.size()) * 100) / MAV_INPUT_BUF_LEN;
-        const bool broadcastSignalInactive = broadcastMode && !broadcastSignalActive;
-        const uint8_t statusRssi = broadcastSignalInactive ? uint8_t{0} :
-            (uint8_t)((float)linkStats.uplink_Link_quality * 2.55);
-        const uint8_t statusRemoteRssi = broadcastSignalInactive ? uint8_t{0} :
-            (uint8_t)linkStats.uplink_RSSI_1;
-        const uint8_t statusNoise = broadcastSignalInactive ? uint8_t{0} :
-            (uint8_t)linkStats.uplink_SNR;
+        const uint8_t broadcastRssi = linkStats.active_antenna == 0
+            ? (uint8_t)linkStats.uplink_RSSI_1
+            : (uint8_t)linkStats.uplink_RSSI_2;
+        const uint8_t statusRssi = broadcastMode
+            ? broadcastRssi
+            : (uint8_t)((float)linkStats.uplink_Link_quality * 2.55);
+        const uint8_t statusRemoteRssi = broadcastMode
+            ? broadcastRssi
+            : (uint8_t)linkStats.uplink_RSSI_1;
+        const uint8_t statusNoise = broadcastMode && broadcastRssi == 0
+            ? uint8_t{0}
+            : (uint8_t)linkStats.uplink_SNR;
 
         // Populate radio status packet
         const mavlink_radio_status_t radio_status {
@@ -339,7 +343,8 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
                 (unsigned long)Radio.GetStarboundRxDoneCount(),
                 statusRxCounter,
                 statusTxCounter,
-                (unsigned long)(lastValidBroadcastPacket != 0),
+                (unsigned long)(linkStats.uplink_RSSI_1 != 0 ||
+                                linkStats.uplink_RSSI_2 != 0),
                 Radio.GetStarboundLastIrqStatus());
         }
         else
