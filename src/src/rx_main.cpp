@@ -142,9 +142,11 @@ uint8_t DataUlBuffer[ELRS_DATA_UL_BUFFER];
 static uint8_t NextTelemetryType = PACKET_TYPE_LINKSTATS;
 static bool telemBurstValid;
 #if defined(STARBOUND_RECEIVER)
-// Set this to false to boot in normal bidirectional ELRS mode instead.
-static constexpr bool StarboundBroadcastModeDefault = true;
+// Boot in normal bidirectional Pilot mode so the ELRS UART is immediately
+// available for RC/MAVLink bring-up and packet inspection.
+static constexpr bool StarboundBroadcastModeDefault = false;
 static volatile bool ReceiverInBroadcastMode;
+static volatile bool StarboundPilotUsesMavlinkOta;
 static uint8_t StarboundNormalUid[UID_LEN];
 static bool StarboundNormalWebserverPreventAutoStart;
 static volatile uint32_t StarboundBroadcastLastValidPacket;
@@ -1059,6 +1061,16 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     DBGW('s');
 #endif
 
+#if defined(STARBOUND_RECEIVER)
+    // The Starbound flight-controller port is MAVLink in both radio modes.
+    // A normal ELRS handset still uses CRSF over the air, but RC channels are
+    // delivered to ArduPilot as MAVLink RC_CHANNELS_OVERRIDE messages.
+    StarboundPilotUsesMavlinkOta = otaSync->otaProtocol == TX_MAVLINK_MODE;
+    if (config.GetSerialProtocol() != PROTOCOL_MAVLINK)
+    {
+        config.SetSerialProtocol(PROTOCOL_MAVLINK);
+    }
+#else
     if (otaSync->otaProtocol == TX_MAVLINK_MODE)
     {
         config.SetSerialProtocol(PROTOCOL_MAVLINK);
@@ -1067,6 +1079,7 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     {
         config.SetSerialProtocol(PROTOCOL_CRSF);
     }
+#endif
 
     // Check if otaProtocol has been updated.
     if (config.IsModified())
@@ -1760,6 +1773,11 @@ bool starboundReceiverIsBroadcastMode()
     return ReceiverInBroadcastMode;
 }
 
+bool starboundReceiverPilotUsesMavlinkOta()
+{
+    return StarboundPilotUsesMavlinkOta;
+}
+
 uint32_t starboundReceiverLastValidPacket()
 {
     return StarboundBroadcastLastValidPacket;
@@ -1780,6 +1798,13 @@ void starboundReceiverSetBroadcastMode(bool enabled)
     if (ReceiverInBroadcastMode == enabled || InBindingMode)
     {
         return;
+    }
+
+    // Stop Pilot RC and telemetry production immediately. This keeps the
+    // connected handset from refilling queues while its link is torn down.
+    if (enabled)
+    {
+        ReceiverInBroadcastMode = true;
     }
 
     DataUlReceiver.ResetState();
@@ -1811,7 +1836,6 @@ void starboundReceiverSetBroadcastMode(bool enabled)
         StarboundBroadcastHardwareErrors = 0;
         StarboundBroadcastCrcErrors = 0;
         Radio.ResetStarboundRxDiagnostics();
-        ReceiverInBroadcastMode = true;
         SetRFLinkRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ), false);
         OtaNonce = 0;
         setConnectionState(disconnected);

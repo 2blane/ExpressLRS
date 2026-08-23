@@ -1,14 +1,16 @@
 #if defined(TARGET_RX)
 
+#define MAVLINK_COMM_NUM_BUFFERS 2
+
 #include "SerialMavlink.h"
 #include "OTA.h"
 #include "common.h"
 #include "config.h"
 #include "device.h"
+#include "MAVLink.h"
 
 #define MAVLINK_RC_PACKET_INTERVAL 10
 
-#define MAVLINK_COMM_NUM_BUFFERS 2
 #include "common/mavlink.h"
 
 #define MAV_FTP_OPCODE_OPENFILERO 4
@@ -16,9 +18,13 @@
 #if defined(STARBOUND_RECEIVER)
 extern void starboundReceiverSetBroadcastMode(bool enabled);
 extern bool starboundReceiverIsBroadcastMode();
+extern bool starboundReceiverPilotUsesMavlinkOta();
 extern uint32_t starboundReceiverLastValidPacket();
 extern uint16_t starboundReceiverHardwareErrors();
 extern uint16_t starboundReceiverCrcErrors();
+
+static constexpr uint8_t STARBOUND_RADIO_MODE_PILOT = 0xB0;
+static constexpr uint8_t STARBOUND_RADIO_MODE_BROADCAST = 0xB2;
 
 static bool processStarboundModeCommand(const mavlink_message_t &msg)
 {
@@ -72,13 +78,25 @@ static bool processStarboundModeCommand(const mavlink_message_t &msg)
 SerialMavlink::SerialMavlink(Stream &out, Stream &in):
     SerialIO(&out, &in),
 
+#if defined(STARBOUND_RECEIVER)
+    // ArduPilot accepts RC_CHANNELS_OVERRIDE only from SYSID_MYGCS. Starbound
+    // fixes that to 255 and broadcasts only on the receiver's dedicated local
+    // UART, so persisted ELRS IDs cannot silently block Pilot controls and the
+    // same receiver firmware works with every drone SYSID.
+    this_system_id(255),
+#else
     //system ID of the device component sending command to FC, can be set using lua options, 0 is the default value for initialized storage, treat it as 255 which is commonly used as GCS SysID
     this_system_id(config.GetSourceSysId() ? config.GetSourceSysId() : 255),
+#endif
     //use telemetry radio compId as we are providing radio status messages and pass telemetry
     this_component_id(MAV_COMPONENT::MAV_COMP_ID_TELEMETRY_RADIO),
 
     // system ID of vehicle we want to control must be the same as target vehicle, can be set using lua options, 0 is the default value for initialized storage, treat it as 1 which is commonly used as UAV SysID in 1:1 networks
+#if defined(STARBOUND_RECEIVER)
+    target_system_id(1),
+#else
     target_system_id(config.GetTargetSysId() ? config.GetTargetSysId() : 1),
+#endif
     // Send to all components as we may have ex. gimbal that listens to RC instead of using Autopilot driver
     target_component_id(MAV_COMPONENT::MAV_COMP_ID_ALL)
 {
@@ -97,6 +115,9 @@ uint32_t SerialMavlink::sendRCFrame(bool frameAvailable, bool frameMissed, uint3
     if (!frameAvailable) {
         return DURATION_IMMEDIATELY;
     }
+#if defined(STARBOUND_RECEIVER)
+    pilotRcFramesReceived++;
+#endif
 
     const mavlink_rc_channels_override_t rc_override {
         chan1_raw: CRSF_to_US(channelData[0]),
@@ -123,7 +144,15 @@ uint32_t SerialMavlink::sendRCFrame(bool frameAvailable, bool frameMissed, uint3
     mavlink_message_t msg;
     mavlink_msg_rc_channels_override_encode(this_system_id, this_component_id, &msg, &rc_override);
     uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-    _outputPort->write(buf, len);
+    // RC, status, and relayed MAVLink frames share one serialized UART queue.
+    // Writing RC directly here can interleave bytes with the main-loop drain.
+    const bool queued = queueSerialBytes(buf, len);
+#if defined(STARBOUND_RECEIVER)
+    if (queued)
+    {
+        pilotRcOverridesSent++;
+    }
+#endif
 
     return MAVLINK_RC_PACKET_INTERVAL;
 }
@@ -143,6 +172,14 @@ void SerialMavlink::processBytes(uint8_t *bytes, u_int16_t size)
         mavlink_status_t status;
         if (mavlink_frame_char(MAVLINK_COMM_1, bytes[i], &msg, &status) == MAVLINK_FRAMING_OK)
         {
+#if defined(STARBOUND_RECEIVER)
+            if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT &&
+                msg.compid == MAV_COMP_ID_AUTOPILOT1 && msg.sysid != 0)
+            {
+                target_system_id = msg.sysid;
+                target_system_learned = true;
+            }
+#endif
             handledModeCommand |= processStarboundModeCommand(msg);
         }
     }
@@ -156,6 +193,32 @@ void SerialMavlink::processBytes(uint8_t *bytes, u_int16_t size)
 #endif
     if (connectionState == connected)
     {
+#if defined(STARBOUND_RECEIVER)
+        if (!starboundReceiverPilotUsesMavlinkOta())
+        {
+            // A normal ELRS handset expects CRSF telemetry. Keep the
+            // flight-controller UART purely MAVLink and translate recognized
+            // ArduPilot messages before handing them to the OTA CRSF router.
+            uint8_t conversionBuffer[CRSF_FRAME_NOT_COUNTED_BYTES +
+                                     CRSF_PAYLOAD_SIZE_MAX]{};
+            conversionBuffer[0] = CRSF_ADDRESS_USB;
+            uint16_t offset = 0;
+            while (offset < size)
+            {
+                const uint8_t count = (uint8_t)std::min(
+                    (uint16_t)CRSF_PAYLOAD_SIZE_MAX,
+                    (uint16_t)(size - offset));
+                conversionBuffer[1] = count;
+                memcpy(conversionBuffer + CRSF_FRAME_NOT_COUNTED_BYTES,
+                       bytes + offset, count);
+                convert_mavlink_to_crsf_telem(
+                    CRSF_ADDRESS_RADIO_TRANSMITTER,
+                    conversionBuffer, count);
+                offset += count;
+            }
+            return;
+        }
+#endif
         mavlinkInputBuffer.atomicPushBytes(bytes, size);
     }
 }
@@ -170,15 +233,20 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
     const uint32_t lastValidBroadcastPacket = starboundReceiverLastValidPacket();
     const bool broadcastSignalActive = lastValidBroadcastPacket != 0 &&
         (now - lastValidBroadcastPacket) <= BROADCAST_SIGNAL_ACTIVE_TIMEOUT;
-    const uint32_t radioStatusInterval = broadcastMode ? BROADCAST_RADIO_STATUS_INTERVAL : 10;
-    const uint16_t broadcastHardwareErrors = broadcastMode ? starboundReceiverHardwareErrors() : 0;
-    const uint16_t broadcastCrcErrors = broadcastMode ? starboundReceiverCrcErrors() : 0;
+    // RADIO_STATUS is state/diagnostic telemetry, not an RC transport clock.
+    // Sending it at 100 Hz needlessly competes with the 100 Hz override stream
+    // on the flight-controller UART and can exhaust ArduPilot's receive budget.
+    const uint32_t radioStatusInterval = BROADCAST_RADIO_STATUS_INTERVAL;
+    const uint16_t statusRxCounter = broadcastMode
+        ? starboundReceiverHardwareErrors() : pilotRcFramesReceived;
+    const uint16_t statusTxCounter = broadcastMode
+        ? starboundReceiverCrcErrors() : pilotRcOverridesSent;
 #else
     constexpr bool broadcastMode = false;
     constexpr bool broadcastSignalActive = false;
     constexpr uint32_t radioStatusInterval = 10;
-    constexpr uint16_t broadcastHardwareErrors = 0;
-    constexpr uint16_t broadcastCrcErrors = 0;
+    constexpr uint16_t statusRxCounter = 0;
+    constexpr uint16_t statusTxCounter = 0;
 #endif
 
     // Parse RF data first so received commands take priority over diagnostics.
@@ -203,9 +271,8 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
         }
     }
 
-    // Normal MAVLink mode retains its 100 Hz flow-control report. Broadcast
-    // mode sends one status per second so the STM32 can verify the UART even
-    // when the Ranger is absent; inactive RF measurements are reported as 0.
+    // Both modes report status once per second. Pilot RC overrides retain their
+    // independent 100 Hz cadence; inactive Broadcast RF measurements are 0.
     if ((now - lastSentFlowCtrl) > radioStatusInterval)
     {
         lastSentFlowCtrl = now;
@@ -222,13 +289,20 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
 
         // Populate radio status packet
         const mavlink_radio_status_t radio_status {
-            rxerrors: broadcastHardwareErrors,
-            fixed: broadcastCrcErrors,
+            // In Pilot mode these counters expose RC frames received and
+            // complete MAVLink overrides written to ArduPilot. Broadcast mode
+            // retains its hardware/CRC diagnostic counters.
+            rxerrors: statusRxCounter,
+            fixed: statusTxCounter,
             rssi: statusRssi,
             remrssi: statusRemoteRssi,
             txbuf: percentage_remaining,
             noise: statusNoise,
-            remnoise: 0,
+            // Starbound mode marker. ArduPilot consumes this only on the
+            // dedicated ELRS MAVLink port; generic telemetry radios retain
+            // the standard RADIO_STATUS behavior.
+            remnoise: broadcastMode ? STARBOUND_RADIO_MODE_BROADCAST
+                                    : STARBOUND_RADIO_MODE_PILOT,
         };
 
         uint8_t buf[MAVLINK_MSG_ID_RADIO_STATUS_LEN + MAVLINK_NUM_NON_PAYLOAD_BYTES];
@@ -263,8 +337,8 @@ void SerialMavlink::sendQueuedData(uint32_t maxBytesToSend)
             broadcastDiagnosticPage = 2;
             snprintf(text, sizeof(text), "SBRX D%lu HW%u OTA%u OK%lu I%04X",
                 (unsigned long)Radio.GetStarboundRxDoneCount(),
-                broadcastHardwareErrors,
-                broadcastCrcErrors,
+                statusRxCounter,
+                statusTxCounter,
                 (unsigned long)(lastValidBroadcastPacket != 0),
                 Radio.GetStarboundLastIrqStatus());
         }
@@ -348,8 +422,16 @@ void SerialMavlink::drainSerialOutput(uint32_t maxBytesToSend)
 
 void SerialMavlink::event()
 {
+#if defined(STARBOUND_RECEIVER)
+    this_system_id = 255;
+    if (!target_system_learned)
+    {
+        target_system_id = 1;
+    }
+#else
     this_system_id = config.GetSourceSysId() ? config.GetSourceSysId() : 255;
     target_system_id = config.GetTargetSysId() ? config.GetTargetSysId() : 1;
+#endif
 }
 
 void SerialMavlink::forwardMessage(const uint8_t *data)
@@ -389,6 +471,8 @@ void SerialMavlink::ResetState()
     mavlinkOutputBuffer.flush();
     mavlinkSerialOutputBuffer.flush();
 #if defined(STARBOUND_RECEIVER)
+    pilotRcFramesReceived = 0;
+    pilotRcOverridesSent = 0;
     lastBroadcastMessageReceived = 0;
 #endif
 }

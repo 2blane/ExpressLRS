@@ -1,4 +1,11 @@
+#pragma once
+
+#include <stdint.h>
+#include "crsf_protocol.h"
+
+#ifndef MAVLINK_COMM_NUM_BUFFERS
 #define MAVLINK_COMM_NUM_BUFFERS 1
+#endif
 #include <CRSFHandset.h>
 
 // Takes a MAVLink message wrapped in CRSF and possibly converts it to a CRSF telemetry message

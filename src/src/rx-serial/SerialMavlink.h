@@ -38,9 +38,14 @@ private:
 
     uint8_t target_system_id;
     const uint8_t target_component_id;
+#if defined(STARBOUND_RECEIVER)
+    bool target_system_learned = false;
+#endif
 
     uint32_t lastSentFlowCtrl = 0;
 #if defined(STARBOUND_RECEIVER)
+    uint16_t pilotRcFramesReceived = 0;
+    uint16_t pilotRcOverridesSent = 0;
     uint32_t lastBroadcastMessageReceived = 0;
     uint32_t lastBroadcastDiagnostic = 0;
     uint8_t broadcastDiagnosticPage = 0;
