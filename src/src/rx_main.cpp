@@ -145,8 +145,8 @@ static bool telemBurstValid;
 // Starbound receivers boot in one-way Broadcast mode for show operations.
 // Pilot mode remains available through the MAVLink mode command.
 static constexpr bool StarboundBroadcastModeDefault = true;
+static constexpr expresslrs_RFrates_e StarboundPacketRate = RATE_LORA_2G4_500HZ;
 static volatile bool ReceiverInBroadcastMode;
-static volatile bool StarboundPilotUsesMavlinkOta;
 static uint8_t StarboundNormalUid[UID_LEN];
 static bool StarboundNormalWebserverPreventAutoStart;
 static volatile uint32_t StarboundBroadcastLastValidPacket;
@@ -1056,6 +1056,17 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
         return false;
     }
 
+#if defined(STARBOUND_RECEIVER)
+    // Pilot mode is a bidirectional MAVLink data link. Refuse normal CRSF link
+    // mode so arbitrary messages such as GPS_RTCM_DATA cannot be silently
+    // reduced to the small set supported by MAVLink-to-CRSF conversion.
+    if (otaSync->otaProtocol != TX_MAVLINK_MODE)
+    {
+        DBGLN("Starbound Pilot requires MAVLink link mode");
+        return false;
+    }
+#endif
+
     LastSyncPacket = now;
 #if defined(DEBUG_RX_SCOREBOARD)
     DBGW('s');
@@ -1063,9 +1074,8 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
 
 #if defined(STARBOUND_RECEIVER)
     // The Starbound flight-controller port is MAVLink in both radio modes.
-    // A normal ELRS handset still uses CRSF over the air, but RC channels are
-    // delivered to ArduPilot as MAVLink RC_CHANNELS_OVERRIDE messages.
-    StarboundPilotUsesMavlinkOta = otaSync->otaProtocol == TX_MAVLINK_MODE;
+    // Compact ELRS RC packets are converted to RC_CHANNELS_OVERRIDE, while
+    // ELRS data packets carry an unrestricted MAVLink byte stream.
     if (config.GetSerialProtocol() != PROTOCOL_MAVLINK)
     {
         config.SetSerialProtocol(PROTOCOL_MAVLINK);
@@ -1773,11 +1783,6 @@ bool starboundReceiverIsBroadcastMode()
     return ReceiverInBroadcastMode;
 }
 
-bool starboundReceiverPilotUsesMavlinkOta()
-{
-    return StarboundPilotUsesMavlinkOta;
-}
-
 uint32_t starboundReceiverLastValidPacket()
 {
     return StarboundBroadcastLastValidPacket;
@@ -1818,7 +1823,7 @@ void starboundReceiverSetBroadcastMode(bool enabled)
     if (enabled)
     {
         // Tear down all synchronized/bidirectional behavior before locking to
-        // the Ranger's fixed initial channel and 250 Hz LoRa packet profile.
+        // the Ranger's fixed initial channel and plain 500 Hz LoRa profile.
         LostConnection(false);
         StarboundNormalWebserverPreventAutoStart = webserverPreventAutoStart;
         // Broadcast receive mode intentionally remains disconnected. Without
@@ -1842,7 +1847,7 @@ void starboundReceiverSetBroadcastMode(bool enabled)
         LPF_UplinkRSSI0.reset();
         LPF_UplinkRSSI1.reset();
         Radio.ResetStarboundRxDiagnostics();
-        SetRFLinkRate(enumRatetoIndexSafe(RATE_LORA_2G4_250HZ), false);
+        SetRFLinkRate(enumRatetoIndexSafe(StarboundPacketRate), false);
         OtaNonce = 0;
         setConnectionState(disconnected);
         Radio.RXnb();
@@ -1855,11 +1860,7 @@ void starboundReceiverSetBroadcastMode(bool enabled)
     memcpy(UID, StarboundNormalUid, UID_LEN);
     OtaUpdateCrcInitFromUid();
     FHSSrandomiseFHSSsequence(OtaGetUidSeed());
-    uint8_t normalRateIndex = config.GetRateInitialIdx();
-    if (!isSupportedRFRate(normalRateIndex))
-    {
-        normalRateIndex = enumRatetoIndexSafe(RATE_LORA_2G4_250HZ);
-    }
+    const uint8_t normalRateIndex = enumRatetoIndexSafe(StarboundPacketRate);
     SetRFLinkRate(normalRateIndex, false);
     scanIndex = normalRateIndex;
     RFmodeCycleMultiplier = RFmodeCycleMultiplierSlow / 2;

@@ -46,6 +46,8 @@ private:
 #if defined(STARBOUND_RECEIVER)
     uint16_t pilotRcFramesReceived = 0;
     uint16_t pilotRcOverridesSent = 0;
+    uint32_t lastPilotMavlinkRcMessage = 0;
+    bool pilotMavlinkRcSeen = false;
     uint32_t lastBroadcastMessageReceived = 0;
     uint32_t lastBroadcastDiagnostic = 0;
     uint8_t broadcastDiagnosticPage = 0;

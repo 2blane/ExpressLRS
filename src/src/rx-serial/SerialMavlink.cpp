@@ -10,6 +10,7 @@
 #include "MAVLink.h"
 
 #define MAVLINK_RC_PACKET_INTERVAL 10
+#define MAVLINK_RC_SOURCE_HOLD_MS 500
 
 #include "common/mavlink.h"
 
@@ -18,7 +19,6 @@
 #if defined(STARBOUND_RECEIVER)
 extern void starboundReceiverSetBroadcastMode(bool enabled);
 extern bool starboundReceiverIsBroadcastMode();
-extern bool starboundReceiverPilotUsesMavlinkOta();
 extern uint32_t starboundReceiverLastValidPacket();
 extern uint16_t starboundReceiverHardwareErrors();
 extern uint16_t starboundReceiverCrcErrors();
@@ -120,6 +120,16 @@ uint32_t SerialMavlink::sendRCFrame(bool frameAvailable, bool frameMissed, uint3
     }
 #if defined(STARBOUND_RECEIVER)
     pilotRcFramesReceived++;
+
+    // A controller may provide RC either as compact ELRS channel packets or
+    // as MAVLink RC messages in the data stream. Prefer the explicit MAVLink
+    // source while it is active so two control sources cannot fight each
+    // other, then fall back to compact RC automatically if it stops.
+    if (pilotMavlinkRcSeen &&
+        (millis() - lastPilotMavlinkRcMessage) <= MAVLINK_RC_SOURCE_HOLD_MS)
+    {
+        return MAVLINK_RC_PACKET_INTERVAL;
+    }
 #endif
 
     const mavlink_rc_channels_override_t rc_override {
@@ -197,30 +207,9 @@ void SerialMavlink::processBytes(uint8_t *bytes, u_int16_t size)
     if (connectionState == connected)
     {
 #if defined(STARBOUND_RECEIVER)
-        if (!starboundReceiverPilotUsesMavlinkOta())
-        {
-            // A normal ELRS handset expects CRSF telemetry. Keep the
-            // flight-controller UART purely MAVLink and translate recognized
-            // ArduPilot messages before handing them to the OTA CRSF router.
-            uint8_t conversionBuffer[CRSF_FRAME_NOT_COUNTED_BYTES +
-                                     CRSF_PAYLOAD_SIZE_MAX]{};
-            conversionBuffer[0] = CRSF_ADDRESS_USB;
-            uint16_t offset = 0;
-            while (offset < size)
-            {
-                const uint8_t count = (uint8_t)std::min(
-                    (uint16_t)CRSF_PAYLOAD_SIZE_MAX,
-                    (uint16_t)(size - offset));
-                conversionBuffer[1] = count;
-                memcpy(conversionBuffer + CRSF_FRAME_NOT_COUNTED_BYTES,
-                       bytes + offset, count);
-                convert_mavlink_to_crsf_telem(
-                    CRSF_ADDRESS_RADIO_TRANSMITTER,
-                    conversionBuffer, count);
-                offset += count;
-            }
-            return;
-        }
+        // Starbound Pilot mode requires ELRS MAVLink link mode. Preserve the
+        // complete flight-controller byte stream for the RF downlink instead
+        // of reducing it to the subset that has a CRSF telemetry equivalent.
 #endif
         mavlinkInputBuffer.atomicPushBytes(bytes, size);
     }
@@ -442,15 +431,45 @@ void SerialMavlink::event()
 void SerialMavlink::forwardMessage(const uint8_t *data)
 {
 #if defined(STARBOUND_RECEIVER)
-    if (starboundReceiverIsBroadcastMode())
-    {
+    uint8_t pilotRcMessageCount = 0;
+    if (starboundReceiverIsBroadcastMode()) {
         lastBroadcastMessageReceived = millis();
-        // DataUlReceiveComplete has already reassembled one complete MAVLink
-        // frame. Forward it verbatim so ArduPilot dialect messages such as
-        // LED_CONTROL are not rejected by ELRS's common-dialect parser.
-        queueSerialBytes(data + CRSF_FRAME_NOT_COUNTED_BYTES, data[1]);
-        return;
     }
+    else
+    {
+        // Observe the MAVLink byte stream without modifying it. Parser state
+        // persists across ELRS payload boundaries, which lets this recognize
+        // full-size frames split over several RF packets.
+        for (uint8_t i = 0; i < data[1]; ++i)
+        {
+            mavlink_message_t msg;
+            mavlink_status_t status;
+            if (mavlink_frame_char(
+                    MAVLINK_COMM_0,
+                    data[CRSF_FRAME_NOT_COUNTED_BYTES + i],
+                    &msg, &status) == MAVLINK_FRAMING_OK &&
+                (msg.msgid == MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE ||
+                 msg.msgid == MAVLINK_MSG_ID_MANUAL_CONTROL))
+            {
+                pilotRcMessageCount++;
+            }
+        }
+    }
+
+    // The stubborn receiver has reassembled an ordered portion of the MAVLink
+    // byte stream. Forward it verbatim in both modes. A frame such as
+    // GPS_RTCM_DATA may span several ELRS payloads, and ArduPilot's parser will
+    // reconstruct it after the bytes reach the UART. Parsing and reserializing
+    // here would reject unknown dialect messages and invalidate signatures.
+    const bool queued = queueSerialBytes(
+        data + CRSF_FRAME_NOT_COUNTED_BYTES, data[1]);
+    if (queued && pilotRcMessageCount > 0)
+    {
+        pilotMavlinkRcSeen = true;
+        lastPilotMavlinkRcMessage = millis();
+        pilotRcOverridesSent += pilotRcMessageCount;
+    }
+    return;
 #endif
     mavlinkOutputBuffer.atomicPushBytes(data + 2, data[1]);
 }
@@ -478,6 +497,8 @@ void SerialMavlink::ResetState()
 #if defined(STARBOUND_RECEIVER)
     pilotRcFramesReceived = 0;
     pilotRcOverridesSent = 0;
+    lastPilotMavlinkRcMessage = 0;
+    pilotMavlinkRcSeen = false;
     lastBroadcastMessageReceived = 0;
 #endif
 }
